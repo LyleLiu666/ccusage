@@ -177,6 +177,8 @@ function asNonEmptyString(value: unknown): string | undefined {
 
 export type LoadOptions = {
 	sessionDirs?: string[];
+	/** Skip files with modification time before this timestamp (ms since epoch) */
+	sinceTimestamp?: number;
 };
 
 export type LoadResult = {
@@ -222,6 +224,20 @@ export async function loadTokenUsageEvents(options: LoadOptions = {}): Promise<L
 		});
 
 		for (const file of files) {
+			// Skip files older than sinceTimestamp based on file modification time
+			if (options.sinceTimestamp != null) {
+				const fileStatResult = await Result.try({
+					try: stat(file),
+					catch: (error) => error,
+				});
+				if (Result.isSuccess(fileStatResult)) {
+					const mtime = fileStatResult.value.mtime.getTime();
+					if (mtime < options.sinceTimestamp) {
+						continue;
+					}
+				}
+			}
+
 			const relativeSessionPath = path.relative(directoryPath, file);
 			const normalizedSessionPath = relativeSessionPath.split(path.sep).join('/');
 			const sessionId = normalizedSessionPath.replace(/\.jsonl$/i, '');

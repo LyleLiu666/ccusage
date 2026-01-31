@@ -14,7 +14,7 @@ import { sharedArgs } from '../_shared-args.ts';
 import { formatModelsList, splitUsageTokens } from '../command-utils.ts';
 import { buildDailyReport } from '../daily-report.ts';
 import { loadTokenUsageEvents } from '../data-loader.ts';
-import { normalizeFilterDate } from '../date-utils.ts';
+import { normalizeFilterDate, toDateKey } from '../date-utils.ts';
 import { log, logger } from '../logger.ts';
 import { CodexPricingSource } from '../pricing.ts';
 
@@ -23,7 +23,15 @@ const TABLE_COLUMN_COUNT = 8;
 export const dailyCommand = define({
 	name: 'daily',
 	description: 'Show Codex token usage grouped by day',
-	args: sharedArgs,
+	args: {
+		...sharedArgs,
+		week: {
+			type: 'boolean',
+			short: 'w',
+			description: 'Show usage for the last 7 days',
+			default: false,
+		},
+	},
 	async run(ctx) {
 		const jsonOutput = Boolean(ctx.values.json);
 		if (jsonOutput) {
@@ -32,16 +40,24 @@ export const dailyCommand = define({
 
 		let since: string | undefined;
 		let until: string | undefined;
+		let sinceTimestamp: number | undefined;
 
 		try {
-			since = normalizeFilterDate(ctx.values.since);
+			if (ctx.values.week) {
+				const now = Date.now();
+				const oneWeekAgo = now - 7 * 24 * 60 * 60 * 1000;
+				sinceTimestamp = oneWeekAgo;
+				since = toDateKey(new Date(oneWeekAgo).toISOString(), ctx.values.timezone);
+			} else {
+				since = normalizeFilterDate(ctx.values.since);
+			}
 			until = normalizeFilterDate(ctx.values.until);
 		} catch (error) {
 			logger.error(String(error));
 			process.exit(1);
 		}
 
-		const { events, missingDirectories } = await loadTokenUsageEvents();
+		const { events, missingDirectories } = await loadTokenUsageEvents({ sinceTimestamp });
 
 		for (const missing of missingDirectories) {
 			logger.warn(`Codex session directory not found: ${missing}`);
