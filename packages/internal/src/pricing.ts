@@ -59,6 +59,22 @@ export type LiteLLMPricingFetcherOptions = {
 	logger?: PricingLogger;
 	offline?: boolean;
 	offlineLoader?: () => Promise<Record<string, LiteLLMModelPricing>>;
+	/**
+	 * Strategy for loading pricing data.
+	 *
+	 * - `network-only`: Always fetch from network.
+	 * - `network-first`: Try network first, fall back to offline loader if network fails.
+	 * - `valid-cache-first`: Try offline loader first. If it returns data, use it. Otherwise (or if empty), fetch from network.
+	 * - `offline-only`: Only use offline loader.
+	 *
+	 * @default 'network-first'
+	 */
+	cacheStrategy?: 'network-only' | 'valid-cache-first' | 'network-first' | 'offline-only';
+	/**
+	 * Callback invoked when new pricing data is successfully fetched from the network.
+	 * This can be used to persist the data to a cache.
+	 */
+	onCacheUpdate?: (pricing: Record<string, LiteLLMModelPricing>) => Promise<void>;
 	url?: string;
 	providerPrefixes?: string[];
 };
@@ -94,14 +110,19 @@ export class LiteLLMPricingFetcher implements Disposable {
 	> | null = null;
 	private readonly logger: PricingLogger;
 	private readonly offline: boolean;
+	private readonly cacheStrategy: 'network-only' | 'valid-cache-first' | 'network-first' | 'offline-only';
 	private readonly offlineLoader?: () => Promise<Record<string, LiteLLMModelPricing>>;
+	private readonly onCacheUpdate?: (pricing: Record<string, LiteLLMModelPricing>) => Promise<void>;
 	private readonly url: string;
 	private readonly providerPrefixes: string[];
 
 	constructor(options: LiteLLMPricingFetcherOptions = {}) {
 		this.logger = createLogger(options.logger);
 		this.offline = Boolean(options.offline);
+		// 'offline' option overrides cacheStrategy if set to true for backwards compatibility
+		this.cacheStrategy = this.offline ? 'offline-only' : (options.cacheStrategy ?? 'network-first');
 		this.offlineLoader = options.offlineLoader;
+		this.onCacheUpdate = options.onCacheUpdate;
 		this.url = options.url ?? LITELLM_PRICING_URL;
 		this.providerPrefixes = options.providerPrefixes ?? DEFAULT_PROVIDER_PREFIXES;
 	}
@@ -148,6 +169,72 @@ export class LiteLLMPricingFetcher implements Disposable {
 		);
 	}
 
+
+
+	private async fetchFromNetwork(): Result.ResultAsync<Map<string, LiteLLMModelPricing>, Error> {
+		this.logger.warn('Fetching latest model pricing from LiteLLM...');
+
+		// Keep track of the raw data to pass to onCacheUpdate
+		let rawData: Record<string, unknown> | null = null;
+
+		return Result.pipe(
+			Result.try({
+				try: fetch(this.url),
+				catch: (error) => new Error('Failed to fetch model pricing from LiteLLM', { cause: error }),
+			}),
+			Result.andThrough((response) => {
+				if (!response.ok) {
+					return Result.fail(new Error(`Failed to fetch pricing data: ${response.statusText}`));
+				}
+				return Result.succeed();
+			}),
+			Result.andThen(async (response) =>
+				Result.try({
+					try: response.json() as Promise<Record<string, unknown>>,
+					catch: (error) => new Error('Failed to parse pricing data', { cause: error }),
+				}),
+			),
+			// Store raw data and parse
+			Result.map((data) => {
+				rawData = data;
+				const pricing = new Map<string, LiteLLMModelPricing>();
+				for (const [modelName, modelData] of Object.entries(data)) {
+					if (typeof modelData !== 'object' || modelData == null) {
+						continue;
+					}
+
+					const parsed = v.safeParse(liteLLMModelPricingSchema, modelData);
+					if (!parsed.success) {
+						continue;
+					}
+
+					pricing.set(modelName, parsed.output);
+				}
+				return pricing;
+			}),
+			Result.inspect(async (pricing) => {
+				this.cachedPricing = pricing;
+				this.logger.info(`Loaded pricing for ${pricing.size} models`);
+
+				// Save to cache if callback is provided
+				if (this.onCacheUpdate != null && rawData != null) {
+					try {
+						// Filter rawData to only include valid items to save storage/bandwidth?
+						// For now, let's just pass the validated items turned back into a record.
+						// Actually, onCacheUpdate signature expects Record<string, LiteLLMModelPricing>
+						const validData: Record<string, LiteLLMModelPricing> = {};
+						for (const [key, value] of pricing) {
+							validData[key] = value;
+						}
+						await this.onCacheUpdate(validData);
+					} catch (error) {
+						this.logger.warn('Failed to update pricing cache', error);
+					}
+				}
+			}),
+		);
+	}
+
 	private async ensurePricingLoaded(): Result.ResultAsync<Map<string, LiteLLMModelPricing>, Error> {
 		if (this.cachedPricing != null) {
 			return Result.succeed(this.cachedPricing);
@@ -162,49 +249,35 @@ export class LiteLLMPricingFetcher implements Disposable {
 		}
 
 		const loadPromise = (async () => {
-			if (this.offline) {
+			if (this.cacheStrategy === 'offline-only') {
 				return this.loadOfflinePricing();
 			}
 
-			this.logger.warn('Fetching latest model pricing from LiteLLM...');
+			if (this.cacheStrategy === 'valid-cache-first') {
+				const offlineResult = await this.loadOfflinePricing();
+				if (Result.isSuccess(offlineResult) && offlineResult.value.size > 0) {
+					this.logger.debug(
+						`Using cached pricing data (${offlineResult.value.size} models) due to valid-cache-first strategy`,
+					);
+					return offlineResult;
+				}
+				// If offline fails or is empty, fall through to network fetch
+				if (Result.isFailure(offlineResult)) {
+					this.logger.debug(
+						'Failed to load offline pricing for valid-cache-first strategy, falling back to network',
+						offlineResult.error,
+					);
+				}
+			}
+
+			if (this.cacheStrategy === 'network-only') {
+				// Skip offline fallback for network-only
+				return this.fetchFromNetwork();
+			}
+
+			// network-first (default)
 			return Result.pipe(
-				Result.try({
-					try: fetch(this.url),
-					catch: (error) =>
-						new Error('Failed to fetch model pricing from LiteLLM', { cause: error }),
-				}),
-				Result.andThrough((response) => {
-					if (!response.ok) {
-						return Result.fail(new Error(`Failed to fetch pricing data: ${response.statusText}`));
-					}
-					return Result.succeed();
-				}),
-				Result.andThen(async (response) =>
-					Result.try({
-						try: response.json() as Promise<Record<string, unknown>>,
-						catch: (error) => new Error('Failed to parse pricing data', { cause: error }),
-					}),
-				),
-				Result.map((data) => {
-					const pricing = new Map<string, LiteLLMModelPricing>();
-					for (const [modelName, modelData] of Object.entries(data)) {
-						if (typeof modelData !== 'object' || modelData == null) {
-							continue;
-						}
-
-						const parsed = v.safeParse(liteLLMModelPricingSchema, modelData);
-						if (!parsed.success) {
-							continue;
-						}
-
-						pricing.set(modelName, parsed.output);
-					}
-					return pricing;
-				}),
-				Result.inspect((pricing) => {
-					this.cachedPricing = pricing;
-					this.logger.info(`Loaded pricing for ${pricing.size} models`);
-				}),
+				await this.fetchFromNetwork(),
 				Result.orElse(async (error) => this.handleFallbackToCachedPricing(error)),
 			);
 		})()

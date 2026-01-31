@@ -1,9 +1,15 @@
+import fs from 'node:fs/promises';
+import { homedir } from 'node:os';
+import path from 'node:path';
+
 import type { LiteLLMModelPricing } from '@ccusage/internal/pricing';
-import type { ModelPricing, PricingSource } from './_types.ts';
 import { LiteLLMPricingFetcher } from '@ccusage/internal/pricing';
 import { Result } from '@praha/byethrow';
+import { xdgCache } from 'xdg-basedir';
+
 import { MILLION } from './_consts.ts';
 import { prefetchCodexPricing } from './_macro.ts' with { type: 'macro' };
+import type { ModelPricing, PricingSource } from './_types.ts';
 import { logger } from './logger.ts';
 
 const CODEX_PROVIDER_PREFIXES = ['openai/', 'azure/', 'openrouter/openai/'];
@@ -21,13 +27,74 @@ export type CodexPricingSourceOptions = {
 
 const PREFETCHED_CODEX_PRICING = prefetchCodexPricing();
 
+const FALLBACK_PRICING: Record<string, LiteLLMModelPricing> = {
+	'gpt-5': {
+		input_cost_per_token: 0.000005,
+		output_cost_per_token: 0.000015,
+	},
+	'gpt-5-codex': {
+		input_cost_per_token: 0.000005,
+		output_cost_per_token: 0.000015,
+	},
+	'gpt-4o': {
+		input_cost_per_token: 0.0000025,
+		output_cost_per_token: 0.00001,
+	},
+};
+
+const INITIAL_PRICING =
+	Object.keys(PREFETCHED_CODEX_PRICING).length > 0
+		? PREFETCHED_CODEX_PRICING
+		: FALLBACK_PRICING;
+
+const CACHE_DIR = path.join(xdgCache ?? path.join(homedir(), '.cache'), 'ccusage');
+const CACHE_FILE = path.join(CACHE_DIR, 'pricing.json');
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+async function loadCache(): Promise<Record<string, LiteLLMModelPricing>> {
+	try {
+		const stat = await fs.stat(CACHE_FILE);
+		if (Date.now() - stat.mtimeMs > CACHE_TTL_MS) {
+			logger.debug('Pricing cache is stale');
+			return INITIAL_PRICING;
+		}
+
+		const content = await fs.readFile(CACHE_FILE, 'utf8');
+		const data = JSON.parse(content) as Record<string, LiteLLMModelPricing>;
+		logger.debug(`Loaded pricing from cache: ${CACHE_FILE}`);
+		return data;
+	} catch (error) {
+		logger.debug('Failed to load pricing cache, using prefetch fallback', String(error));
+		if (Object.keys(INITIAL_PRICING).length > 0) {
+			logger.debug(
+				`Using fallback pricing data (${Object.keys(INITIAL_PRICING).length} models)`,
+			);
+		}
+		return INITIAL_PRICING;
+	}
+}
+
+async function saveCache(pricing: Record<string, LiteLLMModelPricing>): Promise<void> {
+	try {
+		await fs.mkdir(CACHE_DIR, { recursive: true });
+		await fs.writeFile(CACHE_FILE, JSON.stringify(pricing), 'utf8');
+		logger.debug(`Saved pricing to cache: ${CACHE_FILE}`);
+	} catch (error) {
+		const errorMessage = error instanceof Error ? error.message : String(error);
+		logger.warn('Failed to save pricing cache', errorMessage);
+	}
+}
+
 export class CodexPricingSource implements PricingSource, Disposable {
 	private readonly fetcher: LiteLLMPricingFetcher;
 
 	constructor(options: CodexPricingSourceOptions = {}) {
 		this.fetcher = new LiteLLMPricingFetcher({
 			offline: options.offline ?? false,
-			offlineLoader: options.offlineLoader ?? (async () => PREFETCHED_CODEX_PRICING),
+			// If offline is true, it overrides cacheStrategy to 'offline-only'
+			cacheStrategy: 'valid-cache-first',
+			offlineLoader: options.offlineLoader ?? loadCache,
+			onCacheUpdate: saveCache,
 			logger,
 			providerPrefixes: CODEX_PROVIDER_PREFIXES,
 		});
