@@ -1,15 +1,15 @@
+import type { LiteLLMModelPricing } from '@ccusage/internal/pricing';
+import type { ModelPricing, PricingSource } from './_types.ts';
 import fs from 'node:fs/promises';
+
 import { homedir } from 'node:os';
 import path from 'node:path';
-
-import type { LiteLLMModelPricing } from '@ccusage/internal/pricing';
 import { LiteLLMPricingFetcher } from '@ccusage/internal/pricing';
 import { Result } from '@praha/byethrow';
-import { xdgCache } from 'xdg-basedir';
 
+import { xdgCache } from 'xdg-basedir';
 import { MILLION } from './_consts.ts';
 import { prefetchCodexPricing } from './_macro.ts' with { type: 'macro' };
-import type { ModelPricing, PricingSource } from './_types.ts';
 import { logger } from './logger.ts';
 
 const CODEX_PROVIDER_PREFIXES = ['openai/', 'azure/', 'openrouter/openai/'];
@@ -43,9 +43,7 @@ const FALLBACK_PRICING: Record<string, LiteLLMModelPricing> = {
 };
 
 const INITIAL_PRICING =
-	Object.keys(PREFETCHED_CODEX_PRICING).length > 0
-		? PREFETCHED_CODEX_PRICING
-		: FALLBACK_PRICING;
+	Object.keys(PREFETCHED_CODEX_PRICING).length > 0 ? PREFETCHED_CODEX_PRICING : FALLBACK_PRICING;
 
 const CACHE_DIR = path.join(xdgCache ?? path.join(homedir(), '.cache'), 'ccusage');
 const CACHE_FILE = path.join(CACHE_DIR, 'pricing.json');
@@ -56,7 +54,7 @@ async function loadCache(): Promise<Record<string, LiteLLMModelPricing>> {
 		const stat = await fs.stat(CACHE_FILE);
 		if (Date.now() - stat.mtimeMs > CACHE_TTL_MS) {
 			logger.debug('Pricing cache is stale');
-			return INITIAL_PRICING;
+			return await INITIAL_PRICING;
 		}
 
 		const content = await fs.readFile(CACHE_FILE, 'utf8');
@@ -66,9 +64,7 @@ async function loadCache(): Promise<Record<string, LiteLLMModelPricing>> {
 	} catch (error) {
 		logger.debug('Failed to load pricing cache, using prefetch fallback', String(error));
 		if (Object.keys(INITIAL_PRICING).length > 0) {
-			logger.debug(
-				`Using fallback pricing data (${Object.keys(INITIAL_PRICING).length} models)`,
-			);
+			logger.debug(`Using fallback pricing data (${Object.keys(INITIAL_PRICING).length} models)`);
 		}
 		return INITIAL_PRICING;
 	}
@@ -92,7 +88,7 @@ export class CodexPricingSource implements PricingSource, Disposable {
 		this.fetcher = new LiteLLMPricingFetcher({
 			offline: options.offline ?? false,
 			// If offline is true, it overrides cacheStrategy to 'offline-only'
-			cacheStrategy: 'valid-cache-first',
+			cacheStrategy: 'network-first',
 			offlineLoader: options.offlineLoader ?? loadCache,
 			onCacheUpdate: saveCache,
 			logger,
@@ -155,6 +151,51 @@ if (import.meta.vitest != null) {
 			expect(pricing.inputCostPerMToken).toBeCloseTo(1.25);
 			expect(pricing.outputCostPerMToken).toBeCloseTo(10);
 			expect(pricing.cachedInputCostPerMToken).toBeCloseTo(0.125);
+		});
+
+		it('refreshes stale cached pricing for newer versioned models', async () => {
+			const originalFetch = globalThis.fetch;
+			const fetchMock = vi.fn(
+				async () =>
+					new Response(
+						JSON.stringify({
+							'gpt-5.4': {
+								input_cost_per_token: 2.5e-6,
+								output_cost_per_token: 1.5e-5,
+								cache_read_input_token_cost: 2.5e-7,
+							},
+							'gpt-5': {
+								input_cost_per_token: 1.25e-6,
+								output_cost_per_token: 1e-5,
+								cache_read_input_token_cost: 1.25e-7,
+							},
+						}),
+						{ status: 200 },
+					),
+			);
+
+			vi.stubGlobal('fetch', fetchMock);
+
+			try {
+				using source = new CodexPricingSource({
+					offlineLoader: async () => ({
+						'gpt-5': {
+							input_cost_per_token: 1.25e-6,
+							output_cost_per_token: 1e-5,
+							cache_read_input_token_cost: 1.25e-7,
+						},
+					}),
+				});
+
+				const pricing = await source.getPricing('gpt-5.4');
+
+				expect(fetchMock).toHaveBeenCalledOnce();
+				expect(pricing.inputCostPerMToken).toBeCloseTo(2.5);
+				expect(pricing.outputCostPerMToken).toBeCloseTo(15);
+				expect(pricing.cachedInputCostPerMToken).toBeCloseTo(0.25);
+			} finally {
+				vi.stubGlobal('fetch', originalFetch);
+			}
 		});
 	});
 }
