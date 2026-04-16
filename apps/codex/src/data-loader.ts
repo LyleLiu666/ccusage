@@ -115,6 +115,113 @@ const tokenCountPayloadSchema = v.object({
 	info: v.optional(recordSchema),
 });
 
+const FORK_REPLAY_GAP_MS = 1_000;
+const FORK_REPLAY_MAX_BURST_SPAN_MS = 1_000;
+const FORK_REPLAY_MIN_UNIQUE_TIMESTAMPS = 20;
+const FORK_REPLAY_MIN_TOKEN_EVENTS = 20;
+
+function getForkReplayCutoffLine(lines: string[]): number | null {
+	let isForkedSession = false;
+	let foundFirstEntry = false;
+	let forkedSessionId: string | undefined;
+	let sawParentSessionMeta = false;
+	let firstUniqueTimestampMs: number | undefined;
+	let previousUniqueTimestamp: string | undefined;
+	let previousUniqueTimestampMs: number | undefined;
+	let uniqueTimestampCount = 0;
+	let tokenEventCount = 0;
+
+	for (const [index, line] of lines.entries()) {
+		const trimmed = line.trim();
+		if (trimmed === '') {
+			continue;
+		}
+
+		const parseLine = Result.try({
+			try: () => JSON.parse(trimmed) as unknown,
+			catch: (error) => error,
+		});
+		const parsedResult = parseLine();
+		if (Result.isFailure(parsedResult)) {
+			continue;
+		}
+
+		const entryParse = v.safeParse(entrySchema, parsedResult.value);
+		if (!entryParse.success) {
+			continue;
+		}
+
+		const entry = entryParse.output;
+		if (!foundFirstEntry) {
+			foundFirstEntry = true;
+			if (entry.type !== 'session_meta') {
+				return null;
+			}
+
+			const sessionMeta = v.safeParse(recordSchema, entry.payload ?? null);
+			if (!sessionMeta.success) {
+				return null;
+			}
+
+			forkedSessionId = asNonEmptyString(sessionMeta.output.id);
+			isForkedSession = asNonEmptyString(sessionMeta.output.forked_from_id) != null;
+			if (!isForkedSession) {
+				return null;
+			}
+		} else if (entry.type === 'session_meta') {
+			const sessionMeta = v.safeParse(recordSchema, entry.payload ?? null);
+			if (sessionMeta.success) {
+				const sessionId = asNonEmptyString(sessionMeta.output.id);
+				if (sessionId != null && sessionId !== forkedSessionId) {
+					sawParentSessionMeta = true;
+				}
+			}
+		}
+
+		const timestamp = entry.timestamp;
+		if (timestamp == null || timestamp === previousUniqueTimestamp) {
+			const tokenPayloadResult = v.safeParse(tokenCountPayloadSchema, entry.payload ?? undefined);
+			if (tokenPayloadResult.success) {
+				tokenEventCount += 1;
+			}
+			continue;
+		}
+
+		const timestampMs = Date.parse(timestamp);
+		if (Number.isNaN(timestampMs)) {
+			continue;
+		}
+
+		if (
+			previousUniqueTimestampMs != null &&
+			timestampMs - previousUniqueTimestampMs >= FORK_REPLAY_GAP_MS
+		) {
+			const replaySpanMs = (previousUniqueTimestampMs ?? timestampMs) - (firstUniqueTimestampMs ?? timestampMs);
+			if (
+				sawParentSessionMeta &&
+				uniqueTimestampCount >= FORK_REPLAY_MIN_UNIQUE_TIMESTAMPS &&
+				tokenEventCount >= FORK_REPLAY_MIN_TOKEN_EVENTS &&
+				replaySpanMs <= FORK_REPLAY_MAX_BURST_SPAN_MS
+			) {
+				return index;
+			}
+			return null;
+		}
+
+		const tokenPayloadResult = v.safeParse(tokenCountPayloadSchema, entry.payload ?? undefined);
+		if (tokenPayloadResult.success) {
+			tokenEventCount += 1;
+		}
+
+		firstUniqueTimestampMs ??= timestampMs;
+		previousUniqueTimestamp = timestamp;
+		previousUniqueTimestampMs = timestampMs;
+		uniqueTimestampCount += 1;
+	}
+
+	return null;
+}
+
 function extractModel(value: unknown): string | undefined {
 	const parsed = v.safeParse(recordSchema, value);
 	if (!parsed.success) {
@@ -256,7 +363,8 @@ export async function loadTokenUsageEvents(options: LoadOptions = {}): Promise<L
 			let currentModelIsFallback = false;
 			let legacyFallbackUsed = false;
 			const lines = fileContentResult.value.split(/\r?\n/);
-			for (const line of lines) {
+			const forkReplayCutoffLine = getForkReplayCutoffLine(lines);
+			for (const [index, line] of lines.entries()) {
 				const trimmed = line.trim();
 				if (trimmed === '') {
 					continue;
@@ -318,6 +426,10 @@ export async function loadTokenUsageEvents(options: LoadOptions = {}): Promise<L
 				}
 
 				if (raw == null) {
+					continue;
+				}
+
+				if (forkReplayCutoffLine != null && index < forkReplayCutoffLine) {
 					continue;
 				}
 
@@ -389,6 +501,50 @@ export async function loadTokenUsageEvents(options: LoadOptions = {}): Promise<L
 
 if (import.meta.vitest != null) {
 	describe('loadTokenUsageEvents', () => {
+		const buildReplayTokenLines = (options: {
+			baseTimestamp: string;
+			count: number;
+			startInput: number;
+			startCachedInput: number;
+			startOutput: number;
+			model: string;
+		}): string[] =>
+			Array.from({ length: options.count }, (_, index) => {
+				const cumulativeInput = options.startInput + index * 10;
+				const cumulativeCachedInput = options.startCachedInput + index * 2;
+				const cumulativeOutput = options.startOutput + index * 5;
+				const cumulativeTotal = cumulativeInput + cumulativeOutput;
+				const lastInput = index === 0 ? options.startInput : 10;
+				const lastCachedInput = index === 0 ? options.startCachedInput : 2;
+				const lastOutput = index === 0 ? options.startOutput : 5;
+				const lastTotal = index === 0 ? options.startInput + options.startOutput : 15;
+
+				return JSON.stringify({
+					timestamp: `${options.baseTimestamp}${String(index + 2).padStart(3, '0')}Z`,
+					type: 'event_msg',
+					payload: {
+						type: 'token_count',
+						info: {
+							total_token_usage: {
+								input_tokens: cumulativeInput,
+								cached_input_tokens: cumulativeCachedInput,
+								output_tokens: cumulativeOutput,
+								reasoning_output_tokens: 0,
+								total_tokens: cumulativeTotal,
+							},
+							last_token_usage: {
+								input_tokens: lastInput,
+								cached_input_tokens: lastCachedInput,
+								output_tokens: lastOutput,
+								reasoning_output_tokens: 0,
+								total_tokens: lastTotal,
+							},
+							model: options.model,
+						},
+					},
+				});
+			});
+
 		it('parses token_count events and skips entries without model metadata', async () => {
 			await using fixture = await createFixture({
 				sessions: {
@@ -499,6 +655,299 @@ if (import.meta.vitest != null) {
 			expect(events).toHaveLength(1);
 			expect(events[0]!.model).toBe('gpt-5');
 			expect(events[0]!.isFallbackModel).toBe(true);
+		});
+
+		it('skips replayed fork history but keeps new token deltas after the replay cutover', async () => {
+			const replayLines = buildReplayTokenLines({
+				baseTimestamp: '2025-09-16T10:00:00.',
+				count: 25,
+				startInput: 1_000,
+				startCachedInput: 100,
+				startOutput: 400,
+				model: 'gpt-5',
+			});
+			const replayTailInput = 1_000 + (replayLines.length - 1) * 10;
+			const replayTailCachedInput = 100 + (replayLines.length - 1) * 2;
+			const replayTailOutput = 400 + (replayLines.length - 1) * 5;
+
+			await using fixture = await createFixture({
+				sessions: {
+					'forked.jsonl': [
+						JSON.stringify({
+							timestamp: '2025-09-16T10:00:00.000Z',
+							type: 'session_meta',
+							payload: {
+								id: 'forked-session',
+								forked_from_id: 'parent-session',
+								timestamp: '2025-09-16T10:00:00.000Z',
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2025-09-16T10:00:00.001Z',
+							type: 'session_meta',
+							payload: {
+								id: 'parent-session',
+								timestamp: '2025-09-15T09:00:00.000Z',
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2025-09-16T10:00:00.001Z',
+							type: 'turn_context',
+							payload: {
+								model: 'gpt-5',
+							},
+						}),
+						...replayLines,
+						JSON.stringify({
+							timestamp: '2025-09-16T10:00:00.050Z',
+							type: 'event_msg',
+							payload: {
+								type: 'task_started',
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2025-09-16T10:00:00.051Z',
+							type: 'turn_context',
+							payload: {
+								model: 'gpt-5-mini',
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2025-09-16T10:00:00.052Z',
+							type: 'event_msg',
+							payload: {
+								type: 'user_message',
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2025-09-16T10:00:02.500Z',
+							type: 'event_msg',
+							payload: {
+								type: 'token_count',
+								info: {
+									total_token_usage: {
+										input_tokens: replayTailInput + 120,
+										cached_input_tokens: replayTailCachedInput + 20,
+										output_tokens: replayTailOutput + 40,
+										reasoning_output_tokens: 0,
+										total_tokens: replayTailInput + replayTailOutput + 160,
+									},
+								},
+							},
+						}),
+					].join('\n'),
+				},
+			});
+
+			const { events } = await loadTokenUsageEvents({
+				sessionDirs: [fixture.getPath('sessions')],
+			});
+
+			expect(events).toHaveLength(1);
+			expect(events[0]).toMatchObject({
+				model: 'gpt-5-mini',
+				inputTokens: 120,
+				cachedInputTokens: 20,
+				outputTokens: 40,
+				reasoningOutputTokens: 0,
+				totalTokens: 160,
+			});
+		});
+
+		it('drops forked sessions that only replay parent history', async () => {
+			const replayLines = buildReplayTokenLines({
+				baseTimestamp: '2025-09-16T11:00:00.',
+				count: 25,
+				startInput: 500,
+				startCachedInput: 50,
+				startOutput: 200,
+				model: 'gpt-5',
+			});
+
+			await using fixture = await createFixture({
+				sessions: {
+					'forked-replay-only.jsonl': [
+						JSON.stringify({
+							timestamp: '2025-09-16T11:00:00.000Z',
+							type: 'session_meta',
+							payload: {
+								id: 'forked-session',
+								forked_from_id: 'parent-session',
+								timestamp: '2025-09-16T11:00:00.000Z',
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2025-09-16T11:00:00.001Z',
+							type: 'session_meta',
+							payload: {
+								id: 'parent-session',
+								timestamp: '2025-09-15T09:00:00.000Z',
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2025-09-16T11:00:00.002Z',
+							type: 'turn_context',
+							payload: {
+								model: 'gpt-5',
+							},
+						}),
+						...replayLines,
+						JSON.stringify({
+							timestamp: '2025-09-16T11:00:00.050Z',
+							type: 'event_msg',
+							payload: {
+								type: 'task_started',
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2025-09-16T11:00:00.051Z',
+							type: 'turn_context',
+							payload: {
+								model: 'gpt-5',
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2025-09-16T11:00:00.052Z',
+							type: 'event_msg',
+							payload: {
+								type: 'user_message',
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2025-09-16T11:01:05.000Z',
+							type: 'event_msg',
+							payload: {
+								type: 'task_complete',
+							},
+						}),
+					].join('\n'),
+				},
+			});
+
+			const { events } = await loadTokenUsageEvents({
+				sessionDirs: [fixture.getPath('sessions')],
+			});
+
+			expect(events).toEqual([]);
+		});
+
+		it('keeps normal forked sessions when the startup activity does not look like replay', async () => {
+			await using fixture = await createFixture({
+				sessions: {
+					'forked-normal.jsonl': [
+						JSON.stringify({
+							timestamp: '2025-09-16T12:00:00.000Z',
+							type: 'session_meta',
+							payload: {
+								id: 'forked-session',
+								forked_from_id: 'parent-session',
+								timestamp: '2025-09-16T12:00:00.000Z',
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2025-09-16T12:00:00.010Z',
+							type: 'session_meta',
+							payload: {
+								id: 'parent-session',
+								timestamp: '2025-09-15T09:00:00.000Z',
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2025-09-16T12:00:00.020Z',
+							type: 'turn_context',
+							payload: {
+								model: 'gpt-5',
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2025-09-16T12:00:00.030Z',
+							type: 'event_msg',
+							payload: {
+								type: 'token_count',
+								info: {
+									total_token_usage: {
+										input_tokens: 1_000,
+										cached_input_tokens: 100,
+										output_tokens: 400,
+										reasoning_output_tokens: 0,
+										total_tokens: 1_400,
+									},
+									last_token_usage: {
+										input_tokens: 1_000,
+										cached_input_tokens: 100,
+										output_tokens: 400,
+										reasoning_output_tokens: 0,
+										total_tokens: 1_400,
+									},
+									model: 'gpt-5',
+								},
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2025-09-16T12:00:00.040Z',
+							type: 'event_msg',
+							payload: {
+								type: 'token_count',
+								info: {
+									total_token_usage: {
+										input_tokens: 1_120,
+										cached_input_tokens: 100,
+										output_tokens: 460,
+										reasoning_output_tokens: 0,
+										total_tokens: 1_580,
+									},
+									last_token_usage: {
+										input_tokens: 120,
+										cached_input_tokens: 0,
+										output_tokens: 60,
+										reasoning_output_tokens: 0,
+										total_tokens: 180,
+									},
+									model: 'gpt-5',
+								},
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2025-09-16T12:00:00.050Z',
+							type: 'event_msg',
+							payload: {
+								type: 'task_started',
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2025-09-16T12:00:00.060Z',
+							type: 'turn_context',
+							payload: {
+								model: 'gpt-5-mini',
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2025-09-16T12:00:02.500Z',
+							type: 'event_msg',
+							payload: {
+								type: 'token_count',
+								info: {
+									total_token_usage: {
+										input_tokens: 1_300,
+										cached_input_tokens: 120,
+										output_tokens: 520,
+										reasoning_output_tokens: 0,
+										total_tokens: 1_820,
+									},
+								},
+							},
+						}),
+					].join('\n'),
+				},
+			});
+
+			const { events } = await loadTokenUsageEvents({
+				sessionDirs: [fixture.getPath('sessions')],
+			});
+
+			expect(events).toHaveLength(3);
+			expect(events.map((event) => event.model)).toEqual(['gpt-5', 'gpt-5', 'gpt-5-mini']);
+			expect(events.map((event) => event.totalTokens)).toEqual([1_400, 180, 240]);
 		});
 	});
 }
