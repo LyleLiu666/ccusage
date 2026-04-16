@@ -73,6 +73,9 @@ export async function buildSessionReport(
 		}
 
 		addUsage(summary, event);
+		if (event.timestamp < summary.firstTimestamp) {
+			summary.firstTimestamp = event.timestamp;
+		}
 		if (event.timestamp > summary.lastTimestamp) {
 			summary.lastTimestamp = event.timestamp;
 		}
@@ -134,6 +137,7 @@ export async function buildSessionReport(
 
 		rows.push({
 			sessionId: summary.sessionId,
+			firstActivity: summary.firstTimestamp,
 			lastActivity: summary.lastTimestamp,
 			sessionFile,
 			directory,
@@ -232,6 +236,55 @@ if (import.meta.vitest != null) {
 				(100 / 1_000_000) * 0.06 +
 				(200 / 1_000_000) * 2;
 			expect(second.costUSD).toBeCloseTo(expectedCost, 10);
+		});
+
+		it('keeps first and last activity for sessions that span multiple days', async () => {
+			const stubPricingSource: PricingSource = {
+				async getPricing(): Promise<ModelPricing> {
+					return {
+						inputCostPerMToken: 1,
+						cachedInputCostPerMToken: 0.1,
+						outputCostPerMToken: 2,
+					};
+				},
+			};
+
+			const report = await buildSessionReport(
+				[
+					{
+						sessionId: 'project-a/session-a',
+						timestamp: '2025-09-13T01:15:00.000Z',
+						model: 'gpt-5',
+						inputTokens: 200,
+						cachedInputTokens: 0,
+						outputTokens: 100,
+						reasoningOutputTokens: 0,
+						totalTokens: 300,
+					},
+					{
+						sessionId: 'project-a/session-a',
+						timestamp: '2025-09-11T23:45:00.000Z',
+						model: 'gpt-5',
+						inputTokens: 100,
+						cachedInputTokens: 0,
+						outputTokens: 50,
+						reasoningOutputTokens: 0,
+						totalTokens: 150,
+					},
+				],
+				{
+					pricingSource: stubPricingSource,
+				},
+			);
+
+			expect(report).toHaveLength(1);
+			expect(report[0]).toMatchObject({
+				sessionId: 'project-a/session-a',
+				directory: 'project-a',
+				sessionFile: 'session-a',
+				firstActivity: '2025-09-11T23:45:00.000Z',
+				lastActivity: '2025-09-13T01:15:00.000Z',
+			});
 		});
 	});
 }

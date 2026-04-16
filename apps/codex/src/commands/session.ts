@@ -25,6 +25,22 @@ import { buildSessionReport } from '../session-report.ts';
 
 const TABLE_COLUMN_COUNT = 11;
 
+function formatSessionDateRange(
+	firstActivity: string,
+	lastActivity: string,
+	locale?: string,
+	timezone?: string,
+): string {
+	const firstDateKey = toDateKey(firstActivity, timezone);
+	const lastDateKey = toDateKey(lastActivity, timezone);
+
+	if (firstDateKey === lastDateKey) {
+		return formatDisplayDate(lastDateKey, locale, timezone);
+	}
+
+	return `${formatDisplayDate(firstDateKey, locale, timezone)} -> ${formatDisplayDate(lastDateKey, locale, timezone)}`;
+}
+
 export const sessionCommand = define({
 	name: 'session',
 	description: 'Show Codex token usage grouped by session',
@@ -120,7 +136,7 @@ export const sessionCommand = define({
 
 			const table: ResponsiveTable = new ResponsiveTable({
 				head: [
-					'Date',
+					'Dates',
 					'Directory',
 					'Session',
 					'Models',
@@ -145,7 +161,7 @@ export const sessionCommand = define({
 					'right',
 					'left',
 				],
-				compactHead: ['Date', 'Directory', 'Session', 'Input', 'Output', 'Cost (USD)'],
+				compactHead: ['Dates', 'Directory', 'Session', 'Input', 'Output', 'Cost (USD)'],
 				compactColAligns: ['left', 'left', 'left', 'right', 'right', 'right'],
 				compactThreshold: 100,
 				forceCompact: ctx.values.compact,
@@ -171,8 +187,12 @@ export const sessionCommand = define({
 				totalsForDisplay.totalTokens += row.totalTokens;
 				totalsForDisplay.costUSD += row.costUSD;
 
-				const dateKey = toDateKey(row.lastActivity, ctx.values.timezone);
-				const displayDate = formatDisplayDate(dateKey, ctx.values.locale, ctx.values.timezone);
+				const displayDate = formatSessionDateRange(
+					row.firstActivity,
+					row.lastActivity,
+					ctx.values.locale,
+					ctx.values.timezone,
+				);
 				const directoryDisplay = row.directory === '' ? '-' : row.directory;
 				const sessionFile = row.sessionFile;
 				const shortSession = sessionFile.length > 8 ? `…${sessionFile.slice(-8)}` : sessionFile;
@@ -220,3 +240,29 @@ export const sessionCommand = define({
 		}
 	},
 });
+
+if (import.meta.vitest != null) {
+	describe('formatSessionDateRange', () => {
+		it('returns a single date when the session stays on one local day', () => {
+			expect(
+				formatSessionDateRange(
+					'2025-09-12T01:00:00.000Z',
+					'2025-09-12T08:00:00.000Z',
+					'en-US',
+					'UTC',
+				),
+			).toBe('Sep 12, 2025');
+		});
+
+		it('returns a date range when the session spans multiple local days', () => {
+			expect(
+				formatSessionDateRange(
+					'2025-09-11T23:30:00.000Z',
+					'2025-09-12T08:00:00.000Z',
+					'en-US',
+					'UTC',
+				),
+			).toBe('Sep 11, 2025 -> Sep 12, 2025');
+		});
+	});
+}

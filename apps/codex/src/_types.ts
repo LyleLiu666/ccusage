@@ -78,6 +78,7 @@ export type MonthlyReportRow = {
 
 export type SessionReportRow = {
 	sessionId: string;
+	firstActivity: string;
 	lastActivity: string;
 	sessionFile: string;
 	directory: string;
