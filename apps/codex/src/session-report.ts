@@ -3,6 +3,7 @@ import type {
 	ModelUsage,
 	PricingSource,
 	SessionReportRow,
+	SessionStorageSource,
 	SessionUsageSummary,
 	TokenUsageEvent,
 } from './_types.ts';
@@ -17,9 +18,14 @@ export type SessionReportOptions = {
 	pricingSource: PricingSource;
 };
 
-function createSummary(sessionId: string, initialTimestamp: string): SessionUsageSummary {
+function createSummary(
+	sessionId: string,
+	storageSource: SessionStorageSource,
+	initialTimestamp: string,
+): SessionUsageSummary {
 	return {
 		sessionId,
+		storageSource,
 		firstTimestamp: initialTimestamp,
 		lastTimestamp: initialTimestamp,
 		inputTokens: 0,
@@ -67,9 +73,13 @@ export async function buildSessionReport(
 			continue;
 		}
 
-		const summary = summaries.get(sessionId) ?? createSummary(sessionId, event.timestamp);
-		if (!summaries.has(sessionId)) {
-			summaries.set(sessionId, summary);
+		const storageSource = event.storageSource ?? 'custom';
+		const summarySourceKey = event.sessionRoot ?? storageSource;
+		const summaryKey = `${summarySourceKey}:${sessionId}`;
+		const summary =
+			summaries.get(summaryKey) ?? createSummary(sessionId, storageSource, event.timestamp);
+		if (!summaries.has(summaryKey)) {
+			summaries.set(summaryKey, summary);
 		}
 
 		addUsage(summary, event);
@@ -137,6 +147,7 @@ export async function buildSessionReport(
 
 		rows.push({
 			sessionId: summary.sessionId,
+			storageSource: summary.storageSource,
 			firstActivity: summary.firstTimestamp,
 			lastActivity: summary.lastTimestamp,
 			sessionFile,
@@ -218,6 +229,7 @@ if (import.meta.vitest != null) {
 			expect(report).toHaveLength(2);
 			const first = report[0]!;
 			expect(first.sessionId).toBe('session-b');
+			expect(first.storageSource).toBe('custom');
 			expect(first.sessionFile).toBe('session-b');
 			expect(first.directory).toBe('');
 			expect(first.totalTokens).toBe(1_100);
@@ -280,11 +292,108 @@ if (import.meta.vitest != null) {
 			expect(report).toHaveLength(1);
 			expect(report[0]).toMatchObject({
 				sessionId: 'project-a/session-a',
+				storageSource: 'custom',
 				directory: 'project-a',
 				sessionFile: 'session-a',
 				firstActivity: '2025-09-11T23:45:00.000Z',
 				lastActivity: '2025-09-13T01:15:00.000Z',
 			});
+		});
+
+		it('keeps sessions from different storage sources separate even with the same session id', async () => {
+			const stubPricingSource: PricingSource = {
+				async getPricing(): Promise<ModelPricing> {
+					return {
+						inputCostPerMToken: 1,
+						cachedInputCostPerMToken: 0.1,
+						outputCostPerMToken: 2,
+					};
+				},
+			};
+
+			const report = await buildSessionReport(
+				[
+					{
+						sessionId: 'rollout-123',
+						storageSource: 'active',
+						timestamp: '2025-09-13T01:15:00.000Z',
+						model: 'gpt-5',
+						inputTokens: 200,
+						cachedInputTokens: 0,
+						outputTokens: 100,
+						reasoningOutputTokens: 0,
+						totalTokens: 300,
+					},
+					{
+						sessionId: 'rollout-123',
+						storageSource: 'archived',
+						timestamp: '2025-09-11T23:45:00.000Z',
+						model: 'gpt-5',
+						inputTokens: 100,
+						cachedInputTokens: 0,
+						outputTokens: 50,
+						reasoningOutputTokens: 0,
+						totalTokens: 150,
+					},
+				],
+				{
+					pricingSource: stubPricingSource,
+				},
+			);
+
+			expect(report).toHaveLength(2);
+			expect(report.map((row) => row.storageSource)).toEqual(['archived', 'active']);
+			expect(report.map((row) => row.sessionId)).toEqual(['rollout-123', 'rollout-123']);
+			expect(report.map((row) => row.totalTokens)).toEqual([150, 300]);
+		});
+
+		it('keeps sessions from different custom roots separate even with the same session id', async () => {
+			const stubPricingSource: PricingSource = {
+				async getPricing(): Promise<ModelPricing> {
+					return {
+						inputCostPerMToken: 1,
+						cachedInputCostPerMToken: 0.1,
+						outputCostPerMToken: 2,
+					};
+				},
+			};
+
+			const report = await buildSessionReport(
+				[
+					{
+						sessionId: 'shared/session',
+						sessionRoot: '/tmp/root-a',
+						storageSource: 'custom',
+						timestamp: '2025-09-13T01:15:00.000Z',
+						model: 'gpt-5',
+						inputTokens: 200,
+						cachedInputTokens: 0,
+						outputTokens: 100,
+						reasoningOutputTokens: 0,
+						totalTokens: 300,
+					},
+					{
+						sessionId: 'shared/session',
+						sessionRoot: '/tmp/root-b',
+						storageSource: 'custom',
+						timestamp: '2025-09-11T23:45:00.000Z',
+						model: 'gpt-5-mini',
+						inputTokens: 100,
+						cachedInputTokens: 0,
+						outputTokens: 50,
+						reasoningOutputTokens: 0,
+						totalTokens: 150,
+					},
+				],
+				{
+					pricingSource: stubPricingSource,
+				},
+			);
+
+			expect(report).toHaveLength(2);
+			expect(report.map((row) => row.storageSource)).toEqual(['custom', 'custom']);
+			expect(report.map((row) => row.sessionId)).toEqual(['shared/session', 'shared/session']);
+			expect(report.map((row) => row.totalTokens)).toEqual([150, 300]);
 		});
 	});
 }

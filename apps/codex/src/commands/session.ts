@@ -23,7 +23,19 @@ import { log, logger } from '../logger.ts';
 import { CodexPricingSource } from '../pricing.ts';
 import { buildSessionReport } from '../session-report.ts';
 
-const TABLE_COLUMN_COUNT = 11;
+const TABLE_COLUMN_COUNT = 12;
+
+function formatStorageSourceLabel(storageSource: string): string {
+	if (storageSource === 'archived') {
+		return 'Archived';
+	}
+
+	if (storageSource === 'active') {
+		return 'Active';
+	}
+
+	return 'Custom';
+}
 
 function formatSessionDateRange(
 	firstActivity: string,
@@ -137,6 +149,7 @@ export const sessionCommand = define({
 			const table: ResponsiveTable = new ResponsiveTable({
 				head: [
 					'Dates',
+					'Source',
 					'Directory',
 					'Session',
 					'Models',
@@ -153,6 +166,7 @@ export const sessionCommand = define({
 					'left',
 					'left',
 					'left',
+					'left',
 					'right',
 					'right',
 					'right',
@@ -161,7 +175,7 @@ export const sessionCommand = define({
 					'right',
 					'left',
 				],
-				compactHead: ['Dates', 'Directory', 'Session', 'Input', 'Output', 'Cost (USD)'],
+				compactHead: ['Dates', 'Source', 'Session', 'Input', 'Output', 'Cost (USD)'],
 				compactColAligns: ['left', 'left', 'left', 'right', 'right', 'right'],
 				compactThreshold: 100,
 				forceCompact: ctx.values.compact,
@@ -199,6 +213,7 @@ export const sessionCommand = define({
 
 				table.push([
 					displayDate,
+					formatStorageSourceLabel(row.storageSource),
 					directoryDisplay,
 					shortSession,
 					formatModelsDisplayMultiline(formatModelsList(row.models)),
@@ -214,6 +229,7 @@ export const sessionCommand = define({
 
 			addEmptySeparatorRow(table, TABLE_COLUMN_COUNT);
 			table.push([
+				'',
 				'',
 				'',
 				pc.yellow('Total'),

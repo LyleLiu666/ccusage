@@ -1,4 +1,4 @@
-import type { TokenUsageDelta, TokenUsageEvent } from './_types.ts';
+import type { SessionStorageSource, TokenUsageDelta, TokenUsageEvent } from './_types.ts';
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
@@ -8,6 +8,7 @@ import { glob } from 'tinyglobby';
 import * as v from 'valibot';
 import {
 	CODEX_HOME_ENV,
+	DEFAULT_ARCHIVED_SESSION_SUBDIR,
 	DEFAULT_CODEX_DIR,
 	DEFAULT_SESSION_SUBDIR,
 	SESSION_GLOB,
@@ -196,7 +197,8 @@ function getForkReplayCutoffLine(lines: string[]): number | null {
 			previousUniqueTimestampMs != null &&
 			timestampMs - previousUniqueTimestampMs >= FORK_REPLAY_GAP_MS
 		) {
-			const replaySpanMs = (previousUniqueTimestampMs ?? timestampMs) - (firstUniqueTimestampMs ?? timestampMs);
+			const replaySpanMs =
+				(previousUniqueTimestampMs ?? timestampMs) - (firstUniqueTimestampMs ?? timestampMs);
 			if (
 				sawParentSessionMeta &&
 				uniqueTimestampCount >= FORK_REPLAY_MIN_UNIQUE_TIMESTAMPS &&
@@ -293,6 +295,20 @@ export type LoadResult = {
 	missingDirectories: string[];
 };
 
+type SessionDirConfig = {
+	path: string;
+	storageSource: SessionStorageSource;
+	optionalIfMissing: boolean;
+};
+
+function isMissingDirectoryError(error: unknown): boolean {
+	if (typeof error !== 'object' || error == null || !('code' in error)) {
+		return false;
+	}
+
+	return (error as { code?: string }).code === 'ENOENT';
+}
+
 export async function loadTokenUsageEvents(options: LoadOptions = {}): Promise<LoadResult> {
 	const providedDirs =
 		options.sessionDirs != null && options.sessionDirs.length > 0
@@ -302,21 +318,37 @@ export async function loadTokenUsageEvents(options: LoadOptions = {}): Promise<L
 	const codexHomeEnv = process.env[CODEX_HOME_ENV]?.trim();
 	const codexHome =
 		codexHomeEnv != null && codexHomeEnv !== '' ? path.resolve(codexHomeEnv) : DEFAULT_CODEX_DIR;
-	const defaultSessionsDir = path.join(codexHome, DEFAULT_SESSION_SUBDIR);
-	const sessionDirs = providedDirs ?? [defaultSessionsDir];
+	const sessionDirs: SessionDirConfig[] = providedDirs?.map((dir) => ({
+		path: dir,
+		storageSource: 'custom',
+		optionalIfMissing: false,
+	})) ?? [
+		{
+			path: path.join(codexHome, DEFAULT_SESSION_SUBDIR),
+			storageSource: 'active',
+			optionalIfMissing: false,
+		},
+		{
+			path: path.join(codexHome, DEFAULT_ARCHIVED_SESSION_SUBDIR),
+			storageSource: 'archived',
+			optionalIfMissing: true,
+		},
+	];
 
 	const events: TokenUsageEvent[] = [];
 	const missingDirectories: string[] = [];
 
-	for (const dir of sessionDirs) {
-		const directoryPath = path.resolve(dir);
+	for (const sessionDir of sessionDirs) {
+		const directoryPath = path.resolve(sessionDir.path);
 		const statResult = await Result.try({
 			try: stat(directoryPath),
 			catch: (error) => error,
 		});
 
 		if (Result.isFailure(statResult)) {
-			missingDirectories.push(directoryPath);
+			if (!(sessionDir.optionalIfMissing && isMissingDirectoryError(statResult.error))) {
+				missingDirectories.push(directoryPath);
+			}
 			continue;
 		}
 
@@ -467,6 +499,8 @@ export async function loadTokenUsageEvents(options: LoadOptions = {}): Promise<L
 
 				const event: TokenUsageEvent = {
 					sessionId,
+					storageSource: sessionDir.storageSource,
+					sessionRoot: directoryPath,
 					timestamp,
 					model,
 					inputTokens: delta.inputTokens,
@@ -501,6 +535,10 @@ export async function loadTokenUsageEvents(options: LoadOptions = {}): Promise<L
 
 if (import.meta.vitest != null) {
 	describe('loadTokenUsageEvents', () => {
+		afterEach(() => {
+			vi.unstubAllEnvs();
+		});
+
 		const buildReplayTokenLines = (options: {
 			baseTimestamp: string;
 			count: number;
@@ -948,6 +986,276 @@ if (import.meta.vitest != null) {
 			expect(events).toHaveLength(3);
 			expect(events.map((event) => event.model)).toEqual(['gpt-5', 'gpt-5', 'gpt-5-mini']);
 			expect(events.map((event) => event.totalTokens)).toEqual([1_400, 180, 240]);
+		});
+
+		it('loads archived sessions from the default Codex home', async () => {
+			await using fixture = await createFixture({
+				sessions: {
+					'2026/04/18/active-session.jsonl': [
+						JSON.stringify({
+							timestamp: '2026-04-18T08:00:00.000Z',
+							type: 'turn_context',
+							payload: {
+								model: 'gpt-5',
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2026-04-18T08:00:01.000Z',
+							type: 'event_msg',
+							payload: {
+								type: 'token_count',
+								info: {
+									last_token_usage: {
+										input_tokens: 100,
+										cached_input_tokens: 0,
+										output_tokens: 40,
+										reasoning_output_tokens: 0,
+										total_tokens: 140,
+									},
+									total_token_usage: {
+										input_tokens: 100,
+										cached_input_tokens: 0,
+										output_tokens: 40,
+										reasoning_output_tokens: 0,
+										total_tokens: 140,
+									},
+									model: 'gpt-5',
+								},
+							},
+						}),
+					].join('\n'),
+				},
+				archived_sessions: {
+					'archived-session.jsonl': [
+						JSON.stringify({
+							timestamp: '2026-04-17T08:00:00.000Z',
+							type: 'turn_context',
+							payload: {
+								model: 'gpt-5-mini',
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2026-04-17T08:00:01.000Z',
+							type: 'event_msg',
+							payload: {
+								type: 'token_count',
+								info: {
+									last_token_usage: {
+										input_tokens: 80,
+										cached_input_tokens: 0,
+										output_tokens: 20,
+										reasoning_output_tokens: 0,
+										total_tokens: 100,
+									},
+									total_token_usage: {
+										input_tokens: 80,
+										cached_input_tokens: 0,
+										output_tokens: 20,
+										reasoning_output_tokens: 0,
+										total_tokens: 100,
+									},
+									model: 'gpt-5-mini',
+								},
+							},
+						}),
+					].join('\n'),
+				},
+			});
+
+			vi.stubEnv(CODEX_HOME_ENV, fixture.path);
+
+			const { events, missingDirectories } = await loadTokenUsageEvents();
+
+			expect(missingDirectories).toEqual([]);
+			expect(events).toHaveLength(2);
+			expect(events.map((event) => event.sessionId)).toEqual([
+				'archived-session',
+				'2026/04/18/active-session',
+			]);
+			expect(events.map((event) => event.storageSource)).toEqual(['archived', 'active']);
+			expect(events.map((event) => event.model)).toEqual(['gpt-5-mini', 'gpt-5']);
+		});
+
+		it('does not warn when archived sessions directory is absent', async () => {
+			await using fixture = await createFixture({
+				sessions: {
+					'2026/04/18/active-only.jsonl': [
+						JSON.stringify({
+							timestamp: '2026-04-18T09:00:00.000Z',
+							type: 'turn_context',
+							payload: {
+								model: 'gpt-5',
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2026-04-18T09:00:01.000Z',
+							type: 'event_msg',
+							payload: {
+								type: 'token_count',
+								info: {
+									last_token_usage: {
+										input_tokens: 60,
+										cached_input_tokens: 0,
+										output_tokens: 30,
+										reasoning_output_tokens: 0,
+										total_tokens: 90,
+									},
+									total_token_usage: {
+										input_tokens: 60,
+										cached_input_tokens: 0,
+										output_tokens: 30,
+										reasoning_output_tokens: 0,
+										total_tokens: 90,
+									},
+									model: 'gpt-5',
+								},
+							},
+						}),
+					].join('\n'),
+				},
+			});
+
+			vi.stubEnv(CODEX_HOME_ENV, fixture.path);
+
+			const { events, missingDirectories } = await loadTokenUsageEvents();
+
+			expect(missingDirectories).toEqual([]);
+			expect(events).toHaveLength(1);
+			expect(events[0]?.sessionId).toBe('2026/04/18/active-only');
+		});
+
+		it('warns when archived sessions path exists but is not a directory', async () => {
+			await using fixture = await createFixture({
+				sessions: {
+					'2026/04/18/active-only.jsonl': [
+						JSON.stringify({
+							timestamp: '2026-04-18T09:00:00.000Z',
+							type: 'turn_context',
+							payload: {
+								model: 'gpt-5',
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2026-04-18T09:00:01.000Z',
+							type: 'event_msg',
+							payload: {
+								type: 'token_count',
+								info: {
+									last_token_usage: {
+										input_tokens: 60,
+										cached_input_tokens: 0,
+										output_tokens: 30,
+										reasoning_output_tokens: 0,
+										total_tokens: 90,
+									},
+									total_token_usage: {
+										input_tokens: 60,
+										cached_input_tokens: 0,
+										output_tokens: 30,
+										reasoning_output_tokens: 0,
+										total_tokens: 90,
+									},
+									model: 'gpt-5',
+								},
+							},
+						}),
+					].join('\n'),
+				},
+				archived_sessions: 'not-a-directory',
+			});
+
+			vi.stubEnv(CODEX_HOME_ENV, fixture.path);
+
+			const { events, missingDirectories } = await loadTokenUsageEvents();
+
+			expect(events).toHaveLength(1);
+			expect(missingDirectories).toEqual([fixture.getPath('archived_sessions')]);
+		});
+
+		it('keeps the session root on events loaded from multiple custom directories', async () => {
+			await using fixture = await createFixture({
+				rootA: {
+					'shared/session.jsonl': [
+						JSON.stringify({
+							timestamp: '2026-04-18T10:00:00.000Z',
+							type: 'turn_context',
+							payload: {
+								model: 'gpt-5',
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2026-04-18T10:00:01.000Z',
+							type: 'event_msg',
+							payload: {
+								type: 'token_count',
+								info: {
+									last_token_usage: {
+										input_tokens: 50,
+										cached_input_tokens: 0,
+										output_tokens: 10,
+										reasoning_output_tokens: 0,
+										total_tokens: 60,
+									},
+									total_token_usage: {
+										input_tokens: 50,
+										cached_input_tokens: 0,
+										output_tokens: 10,
+										reasoning_output_tokens: 0,
+										total_tokens: 60,
+									},
+									model: 'gpt-5',
+								},
+							},
+						}),
+					].join('\n'),
+				},
+				rootB: {
+					'shared/session.jsonl': [
+						JSON.stringify({
+							timestamp: '2026-04-18T11:00:00.000Z',
+							type: 'turn_context',
+							payload: {
+								model: 'gpt-5-mini',
+							},
+						}),
+						JSON.stringify({
+							timestamp: '2026-04-18T11:00:01.000Z',
+							type: 'event_msg',
+							payload: {
+								type: 'token_count',
+								info: {
+									last_token_usage: {
+										input_tokens: 30,
+										cached_input_tokens: 0,
+										output_tokens: 20,
+										reasoning_output_tokens: 0,
+										total_tokens: 50,
+									},
+									total_token_usage: {
+										input_tokens: 30,
+										cached_input_tokens: 0,
+										output_tokens: 20,
+										reasoning_output_tokens: 0,
+										total_tokens: 50,
+									},
+									model: 'gpt-5-mini',
+								},
+							},
+						}),
+					].join('\n'),
+				},
+			});
+
+			const { events } = await loadTokenUsageEvents({
+				sessionDirs: [fixture.getPath('rootA'), fixture.getPath('rootB')],
+			});
+
+			expect(events.map((event) => event.storageSource)).toEqual(['custom', 'custom']);
+			expect(events.map((event) => event.sessionId)).toEqual(['shared/session', 'shared/session']);
+			expect(events.map((event) => event.sessionRoot)).toEqual([
+				fixture.getPath('rootA'),
+				fixture.getPath('rootB'),
+			]);
 		});
 	});
 }
