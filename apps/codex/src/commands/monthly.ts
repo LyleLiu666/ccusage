@@ -13,7 +13,7 @@ import { DEFAULT_TIMEZONE } from '../_consts.ts';
 import { sharedArgs } from '../_shared-args.ts';
 import { formatModelsList, splitUsageTokens } from '../command-utils.ts';
 import { loadTokenUsageEvents } from '../data-loader.ts';
-import { normalizeFilterDate } from '../date-utils.ts';
+import { normalizeFilterDate, toFilterStartTimestamp } from '../date-utils.ts';
 import { log, logger } from '../logger.ts';
 import { buildMonthlyReport } from '../monthly-report.ts';
 import { CodexPricingSource } from '../pricing.ts';
@@ -32,16 +32,20 @@ export const monthlyCommand = define({
 
 		let since: string | undefined;
 		let until: string | undefined;
+		let sinceTimestamp: number | undefined;
 
 		try {
 			since = normalizeFilterDate(ctx.values.since);
 			until = normalizeFilterDate(ctx.values.until);
+			if (since != null) {
+				sinceTimestamp = toFilterStartTimestamp(since, ctx.values.timezone);
+			}
 		} catch (error) {
 			logger.error(String(error));
 			process.exit(1);
 		}
 
-		const { events, missingDirectories } = await loadTokenUsageEvents();
+		const { events, missingDirectories } = await loadTokenUsageEvents({ sinceTimestamp });
 
 		for (const missing of missingDirectories) {
 			logger.warn(`Codex session directory not found: ${missing}`);

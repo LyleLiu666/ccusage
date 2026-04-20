@@ -14,7 +14,7 @@ import { sharedArgs } from '../_shared-args.ts';
 import { formatModelsList, splitUsageTokens } from '../command-utils.ts';
 import { buildDailyReport } from '../daily-report.ts';
 import { loadTokenUsageEvents } from '../data-loader.ts';
-import { normalizeFilterDate, toDateKey } from '../date-utils.ts';
+import { normalizeFilterDate, toDateKey, toFilterStartTimestamp } from '../date-utils.ts';
 import { log, logger } from '../logger.ts';
 import { CodexPricingSource } from '../pricing.ts';
 
@@ -50,6 +50,9 @@ export const dailyCommand = define({
 				since = toDateKey(new Date(oneWeekAgo).toISOString(), ctx.values.timezone);
 			} else {
 				since = normalizeFilterDate(ctx.values.since);
+				if (since != null) {
+					sinceTimestamp = toFilterStartTimestamp(since, ctx.values.timezone);
+				}
 			}
 			until = normalizeFilterDate(ctx.values.until);
 		} catch (error) {

@@ -1,7 +1,9 @@
 import type { SessionStorageSource, TokenUsageDelta, TokenUsageEvent } from './_types.ts';
-import { readFile, stat } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
+import { createInterface } from 'node:readline';
 import { Result } from '@praha/byethrow';
 import { createFixture } from 'fs-fixture';
 import { glob } from 'tinyglobby';
@@ -121,107 +123,115 @@ const FORK_REPLAY_MAX_BURST_SPAN_MS = 1_000;
 const FORK_REPLAY_MIN_UNIQUE_TIMESTAMPS = 20;
 const FORK_REPLAY_MIN_TOKEN_EVENTS = 20;
 
-function getForkReplayCutoffLine(lines: string[]): number | null {
-	let isForkedSession = false;
-	let foundFirstEntry = false;
-	let forkedSessionId: string | undefined;
-	let sawParentSessionMeta = false;
-	let firstUniqueTimestampMs: number | undefined;
-	let previousUniqueTimestamp: string | undefined;
-	let previousUniqueTimestampMs: number | undefined;
-	let uniqueTimestampCount = 0;
-	let tokenEventCount = 0;
+type SessionEntry = v.InferOutput<typeof entrySchema>;
+type ForkReplayDecision = 'pending' | 'keep' | 'drop';
+type ForkReplayDetector = {
+	foundFirstEntry: boolean;
+	forkedSessionId?: string;
+	sawParentSessionMeta: boolean;
+	firstUniqueTimestampMs?: number;
+	previousUniqueTimestamp?: string;
+	previousUniqueTimestampMs?: number;
+	uniqueTimestampCount: number;
+	tokenEventCount: number;
+};
 
-	for (const [index, line] of lines.entries()) {
-		const trimmed = line.trim();
-		if (trimmed === '') {
-			continue;
+function createForkReplayDetector(): ForkReplayDetector {
+	return {
+		foundFirstEntry: false,
+		sawParentSessionMeta: false,
+		uniqueTimestampCount: 0,
+		tokenEventCount: 0,
+	};
+}
+
+function advanceForkReplayDetector(
+	detector: ForkReplayDetector,
+	entry: SessionEntry,
+): ForkReplayDecision {
+	if (!detector.foundFirstEntry) {
+		detector.foundFirstEntry = true;
+		if (entry.type !== 'session_meta') {
+			return 'keep';
 		}
 
-		const parseLine = Result.try({
-			try: () => JSON.parse(trimmed) as unknown,
-			catch: (error) => error,
-		});
-		const parsedResult = parseLine();
-		if (Result.isFailure(parsedResult)) {
-			continue;
+		const sessionMeta = v.safeParse(recordSchema, entry.payload ?? null);
+		if (!sessionMeta.success) {
+			return 'keep';
 		}
 
-		const entryParse = v.safeParse(entrySchema, parsedResult.value);
-		if (!entryParse.success) {
-			continue;
+		detector.forkedSessionId = asNonEmptyString(sessionMeta.output.id);
+		const isForkedSession = asNonEmptyString(sessionMeta.output.forked_from_id) != null;
+		if (!isForkedSession) {
+			return 'keep';
 		}
-
-		const entry = entryParse.output;
-		if (!foundFirstEntry) {
-			foundFirstEntry = true;
-			if (entry.type !== 'session_meta') {
-				return null;
-			}
-
-			const sessionMeta = v.safeParse(recordSchema, entry.payload ?? null);
-			if (!sessionMeta.success) {
-				return null;
-			}
-
-			forkedSessionId = asNonEmptyString(sessionMeta.output.id);
-			isForkedSession = asNonEmptyString(sessionMeta.output.forked_from_id) != null;
-			if (!isForkedSession) {
-				return null;
-			}
-		} else if (entry.type === 'session_meta') {
-			const sessionMeta = v.safeParse(recordSchema, entry.payload ?? null);
-			if (sessionMeta.success) {
-				const sessionId = asNonEmptyString(sessionMeta.output.id);
-				if (sessionId != null && sessionId !== forkedSessionId) {
-					sawParentSessionMeta = true;
-				}
+	} else if (entry.type === 'session_meta') {
+		const sessionMeta = v.safeParse(recordSchema, entry.payload ?? null);
+		if (sessionMeta.success) {
+			const sessionId = asNonEmptyString(sessionMeta.output.id);
+			if (sessionId != null && sessionId !== detector.forkedSessionId) {
+				detector.sawParentSessionMeta = true;
 			}
 		}
-
-		const timestamp = entry.timestamp;
-		if (timestamp == null || timestamp === previousUniqueTimestamp) {
-			const tokenPayloadResult = v.safeParse(tokenCountPayloadSchema, entry.payload ?? undefined);
-			if (tokenPayloadResult.success) {
-				tokenEventCount += 1;
-			}
-			continue;
-		}
-
-		const timestampMs = Date.parse(timestamp);
-		if (Number.isNaN(timestampMs)) {
-			continue;
-		}
-
-		if (
-			previousUniqueTimestampMs != null &&
-			timestampMs - previousUniqueTimestampMs >= FORK_REPLAY_GAP_MS
-		) {
-			const replaySpanMs =
-				(previousUniqueTimestampMs ?? timestampMs) - (firstUniqueTimestampMs ?? timestampMs);
-			if (
-				sawParentSessionMeta &&
-				uniqueTimestampCount >= FORK_REPLAY_MIN_UNIQUE_TIMESTAMPS &&
-				tokenEventCount >= FORK_REPLAY_MIN_TOKEN_EVENTS &&
-				replaySpanMs <= FORK_REPLAY_MAX_BURST_SPAN_MS
-			) {
-				return index;
-			}
-			return null;
-		}
-
-		const tokenPayloadResult = v.safeParse(tokenCountPayloadSchema, entry.payload ?? undefined);
-		if (tokenPayloadResult.success) {
-			tokenEventCount += 1;
-		}
-
-		firstUniqueTimestampMs ??= timestampMs;
-		previousUniqueTimestamp = timestamp;
-		previousUniqueTimestampMs = timestampMs;
-		uniqueTimestampCount += 1;
 	}
 
-	return null;
+	const tokenPayloadResult = v.safeParse(tokenCountPayloadSchema, entry.payload ?? undefined);
+	const isTokenEvent = tokenPayloadResult.success;
+	const timestamp = entry.timestamp;
+
+	if (timestamp == null || timestamp === detector.previousUniqueTimestamp) {
+		if (isTokenEvent) {
+			detector.tokenEventCount += 1;
+		}
+		return 'pending';
+	}
+
+	const timestampMs = Date.parse(timestamp);
+	if (Number.isNaN(timestampMs)) {
+		return 'pending';
+	}
+
+	if (
+		detector.previousUniqueTimestampMs != null &&
+		timestampMs - detector.previousUniqueTimestampMs >= FORK_REPLAY_GAP_MS
+	) {
+		const replaySpanMs =
+			(detector.previousUniqueTimestampMs ?? timestampMs) -
+			(detector.firstUniqueTimestampMs ?? timestampMs);
+		if (
+			detector.sawParentSessionMeta &&
+			detector.uniqueTimestampCount >= FORK_REPLAY_MIN_UNIQUE_TIMESTAMPS &&
+			detector.tokenEventCount >= FORK_REPLAY_MIN_TOKEN_EVENTS &&
+			replaySpanMs <= FORK_REPLAY_MAX_BURST_SPAN_MS
+		) {
+			return 'drop';
+		}
+		return 'keep';
+	}
+
+	if (isTokenEvent) {
+		detector.tokenEventCount += 1;
+	}
+
+	detector.firstUniqueTimestampMs ??= timestampMs;
+	detector.previousUniqueTimestamp = timestamp;
+	detector.previousUniqueTimestampMs = timestampMs;
+	detector.uniqueTimestampCount += 1;
+	return 'pending';
+}
+
+function parseEntryFromLine(line: string): SessionEntry | null {
+	const parseLine = Result.try({
+		try: () => JSON.parse(line) as unknown,
+		catch: (error) => error,
+	});
+	const parsedResult = parseLine();
+	if (Result.isFailure(parsedResult)) {
+		return null;
+	}
+
+	const entryParse = v.safeParse(entrySchema, parsedResult.value);
+	return entryParse.success ? entryParse.output : null;
 }
 
 function extractModel(value: unknown): string | undefined {
@@ -380,143 +390,147 @@ export async function loadTokenUsageEvents(options: LoadOptions = {}): Promise<L
 			const relativeSessionPath = path.relative(directoryPath, file);
 			const normalizedSessionPath = relativeSessionPath.split(path.sep).join('/');
 			const sessionId = normalizedSessionPath.replace(/\.jsonl$/i, '');
-			const fileContentResult = await Result.try({
-				try: readFile(file, 'utf8'),
-				catch: (error) => error,
-			});
-
-			if (Result.isFailure(fileContentResult)) {
-				logger.debug('Failed to read Codex session file', fileContentResult.error);
-				continue;
-			}
-
 			let previousTotals: RawUsage | null = null;
 			let currentModel: string | undefined;
 			let currentModelIsFallback = false;
 			let legacyFallbackUsed = false;
-			const lines = fileContentResult.value.split(/\r?\n/);
-			const forkReplayCutoffLine = getForkReplayCutoffLine(lines);
-			for (const [index, line] of lines.entries()) {
-				const trimmed = line.trim();
-				if (trimmed === '') {
-					continue;
-				}
+			const replayDetector = createForkReplayDetector();
+			let replayDecision: ForkReplayDecision = 'pending';
+			const bufferedEvents: TokenUsageEvent[] = [];
+			const input = createReadStream(file, { encoding: 'utf8' });
+			const lineReader = createInterface({
+				input,
+				crlfDelay: Infinity,
+			});
 
-				const parseLine = Result.try({
-					try: () => JSON.parse(trimmed) as unknown,
-					catch: (error) => error,
-				});
-				const parsedResult = parseLine();
-
-				if (Result.isFailure(parsedResult)) {
-					continue;
-				}
-
-				const entryParse = v.safeParse(entrySchema, parsedResult.value);
-				if (!entryParse.success) {
-					continue;
-				}
-
-				const { type: entryType, payload, timestamp } = entryParse.output;
-
-				if (entryType === 'turn_context') {
-					const contextPayload = v.safeParse(recordSchema, payload ?? null);
-					if (contextPayload.success) {
-						const contextModel = extractModel(contextPayload.output);
-						if (contextModel != null) {
-							currentModel = contextModel;
-							currentModelIsFallback = false;
-						}
+			try {
+				for await (const line of lineReader) {
+					const trimmed = line.trim();
+					if (trimmed === '') {
+						continue;
 					}
-					continue;
+
+					const entry = parseEntryFromLine(trimmed);
+					if (entry == null) {
+						continue;
+					}
+
+					if (replayDecision === 'pending') {
+						const nextDecision = advanceForkReplayDetector(replayDetector, entry);
+						if (nextDecision === 'drop') {
+							bufferedEvents.length = 0;
+						} else if (nextDecision === 'keep') {
+							events.push(...bufferedEvents);
+							bufferedEvents.length = 0;
+						}
+						replayDecision = nextDecision;
+					}
+
+					const { type: entryType, payload, timestamp } = entry;
+
+					if (entryType === 'turn_context') {
+						const contextPayload = v.safeParse(recordSchema, payload ?? null);
+						if (contextPayload.success) {
+							const contextModel = extractModel(contextPayload.output);
+							if (contextModel != null) {
+								currentModel = contextModel;
+								currentModelIsFallback = false;
+							}
+						}
+						continue;
+					}
+
+					if (entryType !== 'event_msg') {
+						continue;
+					}
+
+					const tokenPayloadResult = v.safeParse(tokenCountPayloadSchema, payload ?? undefined);
+					if (!tokenPayloadResult.success || timestamp == null) {
+						continue;
+					}
+
+					const info = tokenPayloadResult.output.info;
+					const lastUsage = normalizeRawUsage(info?.last_token_usage);
+					const totalUsage = normalizeRawUsage(info?.total_token_usage);
+
+					let raw = lastUsage;
+					if (raw == null && totalUsage != null) {
+						raw = subtractRawUsage(totalUsage, previousTotals);
+					}
+
+					if (totalUsage != null) {
+						previousTotals = totalUsage;
+					}
+
+					if (raw == null) {
+						continue;
+					}
+
+					const delta = convertToDelta(raw);
+					if (
+						delta.inputTokens === 0 &&
+						delta.cachedInputTokens === 0 &&
+						delta.outputTokens === 0 &&
+						delta.reasoningOutputTokens === 0
+					) {
+						continue;
+					}
+
+					const payloadRecordResult = v.safeParse(recordSchema, payload ?? undefined);
+					const extractionSource = payloadRecordResult.success
+						? Object.assign({}, payloadRecordResult.output, { info })
+						: { info };
+					const extractedModel = extractModel(extractionSource);
+					let isFallbackModel = false;
+					if (extractedModel != null) {
+						currentModel = extractedModel;
+						currentModelIsFallback = false;
+					}
+
+					let model = extractedModel ?? currentModel;
+					if (model == null) {
+						model = LEGACY_FALLBACK_MODEL;
+						isFallbackModel = true;
+						legacyFallbackUsed = true;
+						currentModel = model;
+						currentModelIsFallback = true;
+					} else if (extractedModel == null && currentModelIsFallback) {
+						isFallbackModel = true;
+					}
+
+					const event: TokenUsageEvent = {
+						sessionId,
+						storageSource: sessionDir.storageSource,
+						sessionRoot: directoryPath,
+						timestamp,
+						model,
+						inputTokens: delta.inputTokens,
+						cachedInputTokens: delta.cachedInputTokens,
+						outputTokens: delta.outputTokens,
+						reasoningOutputTokens: delta.reasoningOutputTokens,
+						totalTokens: delta.totalTokens,
+					};
+
+					if (isFallbackModel) {
+						event.isFallbackModel = true;
+					}
+
+					if (replayDecision === 'pending') {
+						bufferedEvents.push(event);
+					} else {
+						events.push(event);
+					}
 				}
+			} catch (error) {
+				logger.debug('Failed to read Codex session file', error);
+				continue;
+			} finally {
+				lineReader.close();
+				input.destroy();
+			}
 
-				if (entryType !== 'event_msg') {
-					continue;
-				}
-
-				const tokenPayloadResult = v.safeParse(tokenCountPayloadSchema, payload ?? undefined);
-				if (!tokenPayloadResult.success) {
-					continue;
-				}
-
-				if (timestamp == null) {
-					continue;
-				}
-
-				const info = tokenPayloadResult.output.info;
-				const lastUsage = normalizeRawUsage(info?.last_token_usage);
-				const totalUsage = normalizeRawUsage(info?.total_token_usage);
-
-				let raw = lastUsage;
-				if (raw == null && totalUsage != null) {
-					raw = subtractRawUsage(totalUsage, previousTotals);
-				}
-
-				if (totalUsage != null) {
-					previousTotals = totalUsage;
-				}
-
-				if (raw == null) {
-					continue;
-				}
-
-				if (forkReplayCutoffLine != null && index < forkReplayCutoffLine) {
-					continue;
-				}
-
-				const delta = convertToDelta(raw);
-				if (
-					delta.inputTokens === 0 &&
-					delta.cachedInputTokens === 0 &&
-					delta.outputTokens === 0 &&
-					delta.reasoningOutputTokens === 0
-				) {
-					continue;
-				}
-
-				const payloadRecordResult = v.safeParse(recordSchema, payload ?? undefined);
-				const extractionSource = payloadRecordResult.success
-					? Object.assign({}, payloadRecordResult.output, { info })
-					: { info };
-				const extractedModel = extractModel(extractionSource);
-				let isFallbackModel = false;
-				if (extractedModel != null) {
-					currentModel = extractedModel;
-					currentModelIsFallback = false;
-				}
-
-				let model = extractedModel ?? currentModel;
-				if (model == null) {
-					model = LEGACY_FALLBACK_MODEL;
-					isFallbackModel = true;
-					legacyFallbackUsed = true;
-					currentModel = model;
-					currentModelIsFallback = true;
-				} else if (extractedModel == null && currentModelIsFallback) {
-					isFallbackModel = true;
-				}
-
-				const event: TokenUsageEvent = {
-					sessionId,
-					storageSource: sessionDir.storageSource,
-					sessionRoot: directoryPath,
-					timestamp,
-					model,
-					inputTokens: delta.inputTokens,
-					cachedInputTokens: delta.cachedInputTokens,
-					outputTokens: delta.outputTokens,
-					reasoningOutputTokens: delta.reasoningOutputTokens,
-					totalTokens: delta.totalTokens,
-				};
-
-				if (isFallbackModel) {
-					// Surface the fallback so both table + JSON outputs can annotate pricing that was
-					// inferred rather than sourced from the log metadata.
-					event.isFallbackModel = true;
-				}
-
-				events.push(event);
+			if (replayDecision === 'pending') {
+				events.push(...bufferedEvents);
 			}
 
 			if (legacyFallbackUsed) {

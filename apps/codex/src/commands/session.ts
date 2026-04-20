@@ -18,6 +18,7 @@ import {
 	formatDisplayDateTime,
 	normalizeFilterDate,
 	toDateKey,
+	toFilterStartTimestamp,
 } from '../date-utils.ts';
 import { log, logger } from '../logger.ts';
 import { CodexPricingSource } from '../pricing.ts';
@@ -65,16 +66,20 @@ export const sessionCommand = define({
 
 		let since: string | undefined;
 		let until: string | undefined;
+		let sinceTimestamp: number | undefined;
 
 		try {
 			since = normalizeFilterDate(ctx.values.since);
 			until = normalizeFilterDate(ctx.values.until);
+			if (since != null) {
+				sinceTimestamp = toFilterStartTimestamp(since, ctx.values.timezone);
+			}
 		} catch (error) {
 			logger.error(String(error));
 			process.exit(1);
 		}
 
-		const { events, missingDirectories } = await loadTokenUsageEvents();
+		const { events, missingDirectories } = await loadTokenUsageEvents({ sinceTimestamp });
 
 		for (const missing of missingDirectories) {
 			logger.warn(`Codex session directory not found: ${missing}`);

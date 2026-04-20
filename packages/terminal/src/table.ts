@@ -28,6 +28,98 @@ function createDatePartsFormatter(
 	});
 }
 
+function sanitizeTerminalText(text: string): string {
+	let sanitized = '';
+
+	for (let index = 0; index < text.length; index += 1) {
+		const current = text[index]!;
+		const code = current.charCodeAt(0);
+
+		if (current === '\x1B') {
+			const next = text[index + 1];
+
+			// Preserve harmless SGR styling (ESC [ ... m), strip other CSI controls.
+			if (next === '[') {
+				const sequenceStart = index;
+				index += 1;
+				while (index + 1 < text.length) {
+					index += 1;
+					const finalByte = text.charCodeAt(index);
+					if (finalByte >= 0x40 && finalByte <= 0x7E) {
+						break;
+					}
+				}
+				if (text[index] === 'm') {
+					sanitized += text.slice(sequenceStart, index + 1);
+				}
+				continue;
+			}
+
+			// Skip OSC sequences: ESC ] ... BEL or ESC \
+			if (next === ']') {
+				index += 1;
+				while (index + 1 < text.length) {
+					index += 1;
+					const oscChar = text[index]!;
+					if (oscChar === '\x07') {
+						break;
+					}
+					if (oscChar === '\x1B' && text[index + 1] === '\\') {
+						index += 1;
+						break;
+					}
+				}
+				continue;
+			}
+
+			// Skip any remaining single-character ESC sequence.
+			if (next != null) {
+				index += 1;
+			}
+			continue;
+		}
+
+		if (current === '\r') {
+			continue;
+		}
+
+		if (current === '\t') {
+			sanitized += ' ';
+			continue;
+		}
+
+		const isDisallowedControlCharacter =
+			(code >= 0x00 && code <= 0x08) ||
+			code === 0x0B ||
+			(code >= 0x0C && code <= 0x1F) ||
+			(code >= 0x7F && code <= 0x9F);
+		if (isDisallowedControlCharacter) {
+			continue;
+		}
+
+		sanitized += current;
+	}
+
+	return sanitized;
+}
+
+function sanitizeTableCell(
+	cell: string | number | { content: string; hAlign?: TableCellAlign },
+): string | number | { content: string; hAlign?: TableCellAlign } {
+	if (typeof cell === 'number') {
+		return cell;
+	}
+
+	if (typeof cell === 'string') {
+		return sanitizeTerminalText(cell);
+	}
+
+	return {
+		...cell,
+		content: sanitizeTerminalText(cell.content),
+	};
+}
+
 /**
  * Formats a date string to compact format with year on first line and month-day on second
  * @param dateStr - Input date string (YYYY-MM-DD or ISO timestamp)
@@ -200,13 +292,13 @@ export class ResponsiveTable {
 			: dataRows;
 
 		const allRows = [
-			head.map(String),
+			head.map((cell) => sanitizeTerminalText(String(cell))),
 			...processedDataRows.map((row) =>
 				row.map((cell) => {
 					if (typeof cell === 'object' && cell != null && 'content' in cell) {
-						return String(cell.content);
+						return sanitizeTerminalText(String(cell.content));
 					}
-					return String(cell ?? '');
+					return sanitizeTerminalText(String(cell ?? ''));
 				}),
 			),
 		];
@@ -291,7 +383,7 @@ export class ResponsiveTable {
 						processedRow = this.filterRowToCompact(processedRow, compactIndices);
 					}
 
-					table.push(processedRow);
+					table.push(processedRow.map((cell) => sanitizeTableCell(cell)));
 				}
 			}
 
@@ -317,7 +409,7 @@ export class ResponsiveTable {
 					const processedRow = this.compactMode
 						? this.filterRowToCompact(row, compactIndices)
 						: row;
-					table.push(processedRow);
+					table.push(processedRow.map((cell) => sanitizeTableCell(cell)));
 				}
 			}
 
@@ -951,6 +1043,32 @@ if (import.meta.vitest != null) {
 				// Restore original values
 				process.env.COLUMNS = originalColumns;
 				process.stdout.columns = originalStdoutColumns;
+			});
+
+			it('sanitizes terminal control sequences in rendered cells', () => {
+				const table = new ResponsiveTable({
+					head: ['Model', 'Session'],
+				});
+
+				table.push(['gpt-5\x1B[2J', '\x1B]8;;https://example.test\x07click\x1B]8;;\x07\rname']);
+
+				const output = table.toString();
+				expect(output).toContain('gpt-5');
+				expect(output).toContain('clickname');
+				expect(output).not.toContain('\x1B[2J');
+				expect(output).not.toContain('\x1B]8;;https://example.test');
+				expect(output).not.toContain('\rname');
+			});
+
+			it('preserves safe color styling emitted by the CLI', () => {
+				const table = new ResponsiveTable({
+					head: ['Label'],
+				});
+
+				table.push([pc.yellow('Total')]);
+
+				const output = table.toString();
+				expect(output).toContain(pc.yellow('Total'));
 			});
 		});
 	});

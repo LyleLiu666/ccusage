@@ -59,6 +59,7 @@ export type LiteLLMPricingFetcherOptions = {
 	logger?: PricingLogger;
 	offline?: boolean;
 	offlineLoader?: () => Promise<Record<string, LiteLLMModelPricing>>;
+	fetchTimeoutMs?: number;
 	/**
 	 * Strategy for loading pricing data.
 	 *
@@ -110,11 +111,16 @@ export class LiteLLMPricingFetcher implements Disposable {
 	> | null = null;
 	private readonly logger: PricingLogger;
 	private readonly offline: boolean;
-	private readonly cacheStrategy: 'network-only' | 'valid-cache-first' | 'network-first' | 'offline-only';
+	private readonly cacheStrategy:
+		| 'network-only'
+		| 'valid-cache-first'
+		| 'network-first'
+		| 'offline-only';
 	private readonly offlineLoader?: () => Promise<Record<string, LiteLLMModelPricing>>;
 	private readonly onCacheUpdate?: (pricing: Record<string, LiteLLMModelPricing>) => Promise<void>;
 	private readonly url: string;
 	private readonly providerPrefixes: string[];
+	private readonly fetchTimeoutMs: number;
 
 	constructor(options: LiteLLMPricingFetcherOptions = {}) {
 		this.logger = createLogger(options.logger);
@@ -125,6 +131,7 @@ export class LiteLLMPricingFetcher implements Disposable {
 		this.onCacheUpdate = options.onCacheUpdate;
 		this.url = options.url ?? LITELLM_PRICING_URL;
 		this.providerPrefixes = options.providerPrefixes ?? DEFAULT_PROVIDER_PREFIXES;
+		this.fetchTimeoutMs = options.fetchTimeoutMs ?? 10_000;
 	}
 
 	[Symbol.dispose](): void {
@@ -169,8 +176,6 @@ export class LiteLLMPricingFetcher implements Disposable {
 		);
 	}
 
-
-
 	private async fetchFromNetwork(): Result.ResultAsync<Map<string, LiteLLMModelPricing>, Error> {
 		this.logger.warn('Fetching latest model pricing from LiteLLM...');
 
@@ -179,7 +184,9 @@ export class LiteLLMPricingFetcher implements Disposable {
 
 		return Result.pipe(
 			Result.try({
-				try: fetch(this.url),
+				try: fetch(this.url, {
+					signal: AbortSignal.timeout(this.fetchTimeoutMs),
+				}),
 				catch: (error) => new Error('Failed to fetch model pricing from LiteLLM', { cause: error }),
 			}),
 			Result.andThrough((response) => {
@@ -552,6 +559,39 @@ if (import.meta.vitest != null) {
 
 			const pricing = await Result.unwrap(fetcher.fetchModelPricing());
 			expect(pricing.size).toBe(1);
+		});
+
+		it('passes an abort signal when a fetch timeout is configured', async () => {
+			const originalFetch = globalThis.fetch;
+			const fetchMock = vi.fn(
+				async (_input: string | URL, _init?: RequestInit) =>
+					new Response(
+						JSON.stringify({
+							'gpt-5': {
+								input_cost_per_token: 1e-6,
+								output_cost_per_token: 2e-6,
+							},
+						}),
+						{ status: 200 },
+					),
+			);
+
+			vi.stubGlobal('fetch', fetchMock);
+
+			try {
+				using fetcher = new LiteLLMPricingFetcher({
+					cacheStrategy: 'network-only',
+					fetchTimeoutMs: 1_234,
+					url: 'https://example.invalid/model_prices_and_context_window.json',
+				});
+
+				const pricing = await fetcher.getModelPricing('gpt-5');
+				expect(Result.isSuccess(pricing)).toBe(true);
+				expect(fetchMock).toHaveBeenCalledOnce();
+				expect(fetchMock.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
+			} finally {
+				vi.stubGlobal('fetch', originalFetch);
+			}
 		});
 
 		it('calculates cost using pricing information', async () => {

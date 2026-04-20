@@ -53,6 +53,29 @@ export function isWithinRange(dateKey: string, since?: string, until?: string): 
 	return true;
 }
 
+export function toFilterStartTimestamp(dateKey: string, timezone?: string): number {
+	const tz = safeTimeZone(timezone);
+	const [yearStr = '0', monthStr = '1', dayStr = '1'] = dateKey.split('-');
+	const year = Number.parseInt(yearStr, 10);
+	const month = Number.parseInt(monthStr, 10);
+	const day = Number.parseInt(dayStr, 10);
+
+	let low = Date.UTC(year, month - 1, day) - 36 * 60 * 60 * 1000;
+	let high = Date.UTC(year, month - 1, day) + 36 * 60 * 60 * 1000;
+
+	while (low < high) {
+		const mid = low + Math.floor((high - low) / 2);
+		const currentDateKey = toDateKey(new Date(mid).toISOString(), tz);
+		if (currentDateKey < dateKey) {
+			low = mid + 1;
+		} else {
+			high = mid;
+		}
+	}
+
+	return low;
+}
+
 export function formatDisplayDate(dateKey: string, locale?: string, _timezone?: string): string {
 	// dateKey is already computed for the target timezone via toDateKey().
 	// Treat it as a plain calendar date and avoid shifting it by applying a timezone.
@@ -110,4 +133,21 @@ export function formatDisplayDateTime(
 		timeZone: tz,
 	});
 	return formatter.format(date);
+}
+
+if (import.meta.vitest != null) {
+	describe('toFilterStartTimestamp', () => {
+		it('returns the UTC timestamp for the start of the local day', () => {
+			const timestamp = toFilterStartTimestamp('2025-09-11', 'Asia/Shanghai');
+			expect(new Date(timestamp).toISOString()).toBe('2025-09-10T16:00:00.000Z');
+		});
+
+		it('finds the first instant of a day across DST boundaries', () => {
+			const timestamp = toFilterStartTimestamp('2025-11-02', 'America/New_York');
+			expect(toDateKey(new Date(timestamp).toISOString(), 'America/New_York')).toBe('2025-11-02');
+			expect(toDateKey(new Date(timestamp - 1).toISOString(), 'America/New_York')).toBe(
+				'2025-11-01',
+			);
+		});
+	});
 }
