@@ -5,6 +5,7 @@
 
 import type { DayOfWeek, WeekDay } from './_consts.ts';
 import type { WeeklyDate } from './_types.ts';
+import process from 'node:process';
 import { sort } from 'fast-sort';
 import { DEFAULT_LOCALE } from './_consts.ts';
 import { createWeeklyDate } from './_types.ts';
@@ -111,6 +112,22 @@ export function getDateWeek(date: Date, startDay: DayOfWeek): WeeklyDate {
 	const day = d.getDay();
 	const shift = (day - startDay + 7) % 7;
 	d.setDate(d.getDate() - shift);
+
+	return createWeeklyDate(d.toISOString().substring(0, 10));
+}
+
+/**
+ * Get the first day of the week for a calendar date string without timezone reinterpretation.
+ * @param dateStr - Calendar date in YYYY-MM-DD format
+ * @param startDay - The day to start the week on (0 = Sunday, 1 = Monday, ..., 6 = Saturday)
+ * @returns The date of the first day of the week for the given calendar date
+ */
+export function getDateWeekFromDateString(dateStr: string, startDay: DayOfWeek): WeeklyDate {
+	const [year, month, day] = dateStr.split('-').map((part) => Number.parseInt(part, 10));
+	const d = new Date(Date.UTC(year ?? 0, (month ?? 1) - 1, day ?? 1, 12));
+	const dayOfWeek = d.getUTCDay();
+	const shift = (dayOfWeek - startDay + 7) % 7;
+	d.setUTCDate(d.getUTCDate() - shift);
 
 	return createWeeklyDate(d.toISOString().substring(0, 10));
 }
@@ -254,6 +271,24 @@ if (import.meta.vitest != null) {
 			const date = new Date('2023-12-31T10:00:00Z'); // Sunday
 			const result = getDateWeek(date, 0); // Sunday start
 			expect(result).toBe(createWeeklyDate('2023-12-31')); // Same Sunday
+		});
+	});
+
+	describe('getDateWeekFromDateString', () => {
+		it('should use calendar dates without reinterpreting them in the local timezone', () => {
+			const previousTz = process.env.TZ;
+			process.env.TZ = 'America/New_York';
+
+			try {
+				expect(getDateWeek(new Date('2024-01-01'), 0)).toBe(createWeeklyDate('2024-01-01'));
+				expect(getDateWeekFromDateString('2024-01-01', 0)).toBe(createWeeklyDate('2023-12-31'));
+			} finally {
+				if (previousTz == null) {
+					delete process.env.TZ;
+				} else {
+					process.env.TZ = previousTz;
+				}
+			}
 		});
 	});
 

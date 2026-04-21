@@ -9,14 +9,23 @@ import {
 } from '@ccusage/terminal/table';
 import { Result } from '@praha/byethrow';
 import { define } from 'gunshi';
+import * as configLoaderModule from '../_config-loader-tokens.ts';
 import { loadConfig, mergeConfigWithArgs } from '../_config-loader-tokens.ts';
 import { DEFAULT_LOCALE } from '../_consts.ts';
 import { formatDateCompact } from '../_date-utils.ts';
 import { processWithJq } from '../_jq-processor.ts';
 import { sharedCommandConfig } from '../_shared-args.ts';
+import {
+	createActivityDate,
+	createProjectPath,
+	createSessionId,
+	createVersion,
+} from '../_types.ts';
 import { calculateTotals, createTotalsObject, getTotalTokens } from '../calculate-cost.ts';
+import * as dataLoaderModule from '../data-loader.ts';
 import { loadSessionData } from '../data-loader.ts';
 import { detectMismatches, printMismatchReport } from '../debug.ts';
+import * as loggerModule from '../logger.ts';
 import { log, logger } from '../logger.ts';
 import { handleSessionIdLookup } from './_session_id.ts';
 
@@ -66,12 +75,12 @@ export const sessionCommand = define({
 
 		// Original session listing logic
 		const sessionData = await loadSessionData({
-			since: ctx.values.since,
-			until: ctx.values.until,
-			mode: ctx.values.mode,
-			offline: ctx.values.offline,
-			timezone: ctx.values.timezone,
-			locale: ctx.values.locale,
+			since: mergedOptions.since,
+			until: mergedOptions.until,
+			mode: mergedOptions.mode,
+			offline: mergedOptions.offline,
+			timezone: mergedOptions.timezone,
+			locale: mergedOptions.locale,
 		});
 
 		if (sessionData.length === 0) {
@@ -87,9 +96,9 @@ export const sessionCommand = define({
 		const totals = calculateTotals(sessionData);
 
 		// Show debug information if requested
-		if (ctx.values.debug && !useJson) {
+		if (mergedOptions.debug && !useJson) {
 			const mismatchStats = await detectMismatches(undefined);
-			printMismatchReport(mismatchStats, ctx.values.debugSamples);
+			printMismatchReport(mismatchStats, mergedOptions.debugSamples);
 		}
 
 		if (useJson) {
@@ -112,8 +121,8 @@ export const sessionCommand = define({
 			};
 
 			// Process with jq if specified
-			if (ctx.values.jq != null) {
-				const jqResult = await processWithJq(jsonOutput, ctx.values.jq);
+			if (mergedOptions.jq != null) {
+				const jqResult = await processWithJq(jsonOutput, mergedOptions.jq);
 				if (Result.isFailure(jqResult)) {
 					logger.error(jqResult.error.message);
 					process.exit(1);
@@ -131,8 +140,8 @@ export const sessionCommand = define({
 				firstColumnName: 'Session',
 				includeLastActivity: true,
 				dateFormatter: (dateStr: string) =>
-					formatDateCompact(dateStr, ctx.values.timezone, ctx.values.locale),
-				forceCompact: ctx.values.compact,
+					formatDateCompact(dateStr, mergedOptions.timezone, mergedOptions.locale),
+				forceCompact: mergedOptions.compact,
 			};
 			const table = createUsageReportTable(tableConfig);
 
@@ -159,7 +168,7 @@ export const sessionCommand = define({
 				table.push(row);
 
 				// Add model breakdown rows if flag is set
-				if (ctx.values.breakdown) {
+				if (mergedOptions.breakdown) {
 					// Session has 1 extra column before data and 1 trailing column
 					pushBreakdownRows(table, data.modelBreakdowns, 1, 1);
 				}
@@ -194,3 +203,84 @@ export const sessionCommand = define({
 
 // Note: Tests for --id functionality are covered by the existing loadSessionUsageById tests
 // in data-loader.ts, since this command directly uses that function.
+
+if (import.meta.vitest != null) {
+	describe('sessionCommand', () => {
+		afterEach(() => {
+			vi.restoreAllMocks();
+			vi.unstubAllEnvs();
+		});
+
+		it('uses merged config options when loading session listings', async () => {
+			vi.spyOn(configLoaderModule, 'loadConfig').mockReturnValue(undefined);
+			vi.spyOn(configLoaderModule, 'mergeConfigWithArgs').mockReturnValue({
+				config: '/tmp/config.json',
+				debug: false,
+				debugSamples: 5,
+				json: true,
+				jq: undefined,
+				id: undefined,
+				since: '20240115',
+				until: undefined,
+				mode: 'display',
+				offline: true,
+				timezone: 'UTC',
+				locale: 'en-US',
+				compact: true,
+				breakdown: false,
+			});
+
+			const loadSessionDataSpy = vi.spyOn(dataLoaderModule, 'loadSessionData').mockResolvedValue([
+				{
+					sessionId: createSessionId('session-2'),
+					projectPath: createProjectPath('project1'),
+					inputTokens: 200,
+					outputTokens: 100,
+					cacheCreationTokens: 0,
+					cacheReadTokens: 0,
+					totalCost: 0.02,
+					lastActivity: createActivityDate('2024-01-20'),
+					versions: [createVersion('1.0.0')],
+					modelsUsed: [],
+					modelBreakdowns: [],
+				},
+			]);
+			const logSpy = vi.spyOn(loggerModule, 'log').mockImplementation(() => {});
+
+			if (sessionCommand.run == null) {
+				throw new Error('sessionCommand.run is not defined');
+			}
+
+			await sessionCommand.run({
+				name: 'session',
+				tokens: [],
+				values: {
+					config: undefined,
+					debug: false,
+					debugSamples: 5,
+					json: false,
+					jq: undefined,
+					id: undefined,
+					since: undefined,
+					until: undefined,
+					mode: 'auto',
+					offline: false,
+					timezone: undefined,
+					locale: DEFAULT_LOCALE,
+					compact: false,
+					breakdown: false,
+				},
+			} as never);
+
+			expect(loadSessionDataSpy).toHaveBeenCalledWith({
+				since: '20240115',
+				until: undefined,
+				mode: 'display',
+				offline: true,
+				timezone: 'UTC',
+				locale: 'en-US',
+			});
+			expect(logSpy).toHaveBeenCalled();
+		});
+	});
+}

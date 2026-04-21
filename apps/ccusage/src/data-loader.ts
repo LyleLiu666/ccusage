@@ -37,7 +37,7 @@ import {
 	filterByDateRange,
 	formatDate,
 	formatDateCompact,
-	getDateWeek,
+	getDateWeekFromDateString,
 	getDayNumber,
 	sortByDate,
 } from './_date-utils.ts';
@@ -217,6 +217,21 @@ export const transcriptMessageSchema = v.object({
  * Type definition for Claude usage data entries from JSONL files
  */
 export type UsageData = v.InferOutput<typeof usageDataSchema>;
+
+/**
+ * Type definition for session lookup entries with resolved per-entry cost.
+ */
+export type SessionUsageByIdEntry = UsageData & {
+	resolvedCost: number;
+};
+
+/**
+ * Type definition for session lookup results.
+ */
+export type SessionUsageByIdResult = {
+	totalCost: number;
+	entries: SessionUsageByIdEntry[];
+};
 
 /**
  * Valibot schema for model-specific usage breakdown data
@@ -1062,14 +1077,7 @@ export async function loadSessionData(options?: LoadOptions): Promise<SessionUsa
 		options?.until,
 	);
 
-	// Filter by project if specified
-	const sessionFiltered = filterByProject(
-		dateFiltered,
-		(item) => item.projectPath,
-		options?.project,
-	);
-
-	return sortByDate(sessionFiltered, (item) => item.lastActivity, options?.order);
+	return sortByDate(dateFiltered, (item) => item.lastActivity, options?.order);
 }
 
 /**
@@ -1095,7 +1103,7 @@ export async function loadWeeklyUsageData(options?: LoadOptions): Promise<Weekly
 		options?.startOfWeek != null ? getDayNumber(options.startOfWeek) : getDayNumber('sunday');
 
 	return loadBucketUsageData(
-		(data: DailyUsage) => getDateWeek(new Date(data.date), startDay),
+		(data: DailyUsage) => getDateWeekFromDateString(data.date, startDay),
 		options,
 	).then((usages) =>
 		usages.map<WeeklyUsage>(({ bucket, ...rest }) => ({
@@ -1117,7 +1125,7 @@ export async function loadWeeklyUsageData(options?: LoadOptions): Promise<Weekly
 export async function loadSessionUsageById(
 	sessionId: string,
 	options?: { mode?: CostMode; offline?: boolean },
-): Promise<{ totalCost: number; entries: UsageData[] } | null> {
+): Promise<SessionUsageByIdResult | null> {
 	const claudePaths = getClaudePaths();
 
 	// Find the JSONL file for this session ID
@@ -1139,7 +1147,8 @@ export async function loadSessionUsageById(
 	const mode = options?.mode ?? 'auto';
 	using fetcher = mode === 'display' ? null : new PricingFetcher(options?.offline);
 
-	const entries: UsageData[] = [];
+	const processedHashes = new Set<string>();
+	const entries: SessionUsageByIdEntry[] = [];
 	let totalCost = 0;
 
 	await processJSONLFileByLine(file, async (line) => {
@@ -1151,11 +1160,21 @@ export async function loadSessionUsageById(
 			}
 			const data = result.output;
 
+			const uniqueHash = createUniqueHash(data);
+			if (isDuplicateEntry(uniqueHash, processedHashes)) {
+				return;
+			}
+
+			markAsProcessed(uniqueHash, processedHashes);
+
 			const cost =
 				fetcher != null ? await calculateCostForEntry(data, mode, fetcher) : (data.costUSD ?? 0);
 
 			totalCost += cost;
-			entries.push(data);
+			entries.push({
+				...data,
+				resolvedCost: cost,
+			});
 		} catch {
 			// Skip invalid JSON lines
 		}
@@ -1526,8 +1545,6 @@ if (import.meta.vitest != null) {
 	});
 
 	describe('loadSessionUsageById', async () => {
-		const { createFixture } = await import('fs-fixture');
-
 		afterEach(() => {
 			vi.unstubAllEnvs();
 		});
@@ -1576,6 +1593,7 @@ if (import.meta.vitest != null) {
 			expect(result).not.toBeNull();
 			expect(result?.totalCost).toBe(1.5);
 			expect(result?.entries).toHaveLength(2);
+			expect(result?.entries.map((entry) => entry.resolvedCost)).toEqual([0.5, 1.0]);
 		});
 
 		it('returns null for non-existent session', async () => {
@@ -1605,6 +1623,53 @@ if (import.meta.vitest != null) {
 			const result = await loadSessionUsageById('non-existent', { mode: 'display' });
 
 			expect(result).toBeNull();
+		});
+
+		it('deduplicates duplicate message and request pairs', async () => {
+			await using fixture = await createFixture({
+				'.claude': {
+					projects: {
+						'test-project': {
+							'session-123.jsonl': `${JSON.stringify({
+								timestamp: '2024-01-01T00:00:00Z',
+								sessionId: 'session-123',
+								message: {
+									id: 'message-1',
+									usage: {
+										input_tokens: 100,
+										output_tokens: 50,
+									},
+									model: 'claude-sonnet-4-20250514',
+								},
+								requestId: 'request-1',
+								costUSD: 0.5,
+							})}\n${JSON.stringify({
+								timestamp: '2024-01-01T00:00:00Z',
+								sessionId: 'session-123',
+								message: {
+									id: 'message-1',
+									usage: {
+										input_tokens: 100,
+										output_tokens: 50,
+									},
+									model: 'claude-sonnet-4-20250514',
+								},
+								requestId: 'request-1',
+								costUSD: 0.5,
+							})}`,
+						},
+					},
+				},
+			});
+
+			vi.stubEnv('CLAUDE_CONFIG_DIR', fixture.getPath('.claude'));
+
+			const result = await loadSessionUsageById('session-123', { mode: 'display' });
+
+			expect(result).not.toBeNull();
+			expect(result?.totalCost).toBe(0.5);
+			expect(result?.entries).toHaveLength(1);
+			expect(result?.entries.map((entry) => entry.resolvedCost)).toEqual([0.5]);
 		});
 	});
 
@@ -2358,6 +2423,42 @@ invalid json line
 			});
 		});
 
+		it('groups calendar dates consistently outside UTC timezones', async () => {
+			const previousTz = process.env.TZ;
+			process.env.TZ = 'America/New_York';
+
+			try {
+				const mockData: UsageData[] = [
+					{
+						timestamp: createISOTimestamp('2024-01-01T12:00:00Z'),
+						message: { usage: { input_tokens: 100, output_tokens: 50 } },
+						costUSD: 0.01,
+					},
+				];
+
+				await using fixture = await createFixture({
+					projects: {
+						project1: {
+							session1: {
+								'file.jsonl': mockData.map((d) => JSON.stringify(d)).join('\n'),
+							},
+						},
+					},
+				});
+
+				const result = await loadWeeklyUsageData({ claudePath: fixture.path });
+
+				expect(result).toHaveLength(1);
+				expect(result[0]?.week).toBe('2023-12-31');
+			} finally {
+				if (previousTz == null) {
+					delete process.env.TZ;
+				} else {
+					process.env.TZ = previousTz;
+				}
+			}
+		});
+
 		it('handles empty data', async () => {
 			await using fixture = await createFixture({
 				projects: {},
@@ -2672,6 +2773,38 @@ invalid json line
 			expect(result.find((s) => s.projectPath === 'project1/subfolder')).toBeTruthy();
 			expect(result.find((s) => s.sessionId === 'session456')).toBeTruthy();
 			expect(result.find((s) => s.projectPath === 'project2')).toBeTruthy();
+		});
+
+		it('keeps nested project sessions when filtering by top-level project name', async () => {
+			const mockData: UsageData = {
+				timestamp: createISOTimestamp('2024-01-01T12:00:00Z'),
+				message: { usage: { input_tokens: 100, output_tokens: 50 } },
+				costUSD: 0.01,
+			};
+
+			await using fixture = await createFixture({
+				projects: {
+					'project1/subfolder': {
+						session123: {
+							'chat.jsonl': JSON.stringify(mockData),
+						},
+					},
+					project2: {
+						session456: {
+							'chat.jsonl': JSON.stringify(mockData),
+						},
+					},
+				},
+			});
+
+			const result = await loadSessionData({
+				claudePath: fixture.path,
+				project: 'project1',
+			});
+
+			expect(result).toHaveLength(1);
+			expect(result[0]?.sessionId).toBe('session123');
+			expect(result[0]?.projectPath).toBe('project1/subfolder');
 		});
 
 		it('aggregates session usage data', async () => {

@@ -9,6 +9,7 @@ import {
 import { Result } from '@praha/byethrow';
 import { define } from 'gunshi';
 import pc from 'picocolors';
+import * as configLoaderModule from '../_config-loader-tokens.ts';
 import { loadConfig, mergeConfigWithArgs } from '../_config-loader-tokens.ts';
 import {
 	BLOCKS_COMPACT_WIDTH_THRESHOLD,
@@ -25,7 +26,9 @@ import {
 } from '../_session-blocks.ts';
 import { sharedCommandConfig } from '../_shared-args.ts';
 import { getTotalTokens } from '../_token-utils.ts';
+import * as dataLoaderModule from '../data-loader.ts';
 import { loadSessionBlockData } from '../data-loader.ts';
+import * as loggerModule from '../logger.ts';
 import { log, logger } from '../logger.ts';
 
 /**
@@ -159,20 +162,20 @@ export const blocksCommand = define({
 		}
 
 		// Validate session length
-		if (ctx.values.sessionLength <= 0) {
+		if (mergedOptions.sessionLength <= 0) {
 			logger.error('Session length must be a positive number');
 			process.exit(1);
 		}
 
 		let blocks = await loadSessionBlockData({
-			since: ctx.values.since,
-			until: ctx.values.until,
-			mode: ctx.values.mode,
-			order: ctx.values.order,
-			offline: ctx.values.offline,
-			sessionDurationHours: ctx.values.sessionLength,
-			timezone: ctx.values.timezone,
-			locale: ctx.values.locale,
+			since: mergedOptions.since,
+			until: mergedOptions.until,
+			mode: mergedOptions.mode,
+			order: mergedOptions.order,
+			offline: mergedOptions.offline,
+			sessionDurationHours: mergedOptions.sessionLength,
+			timezone: mergedOptions.timezone,
+			locale: mergedOptions.locale,
 		});
 
 		if (blocks.length === 0) {
@@ -187,9 +190,9 @@ export const blocksCommand = define({
 		// Calculate max tokens from ALL blocks before applying filters
 		let maxTokensFromAll = 0;
 		if (
-			ctx.values.tokenLimit === 'max' ||
-			ctx.values.tokenLimit == null ||
-			ctx.values.tokenLimit === ''
+			mergedOptions.tokenLimit === 'max' ||
+			mergedOptions.tokenLimit == null ||
+			mergedOptions.tokenLimit === ''
 		) {
 			for (const block of blocks) {
 				if (!(block.isGap ?? false) && !block.isActive) {
@@ -205,11 +208,11 @@ export const blocksCommand = define({
 		}
 
 		// Apply filters
-		if (ctx.values.recent) {
+		if (mergedOptions.recent) {
 			blocks = filterRecentBlocks(blocks, DEFAULT_RECENT_DAYS);
 		}
 
-		if (ctx.values.active) {
+		if (mergedOptions.active) {
 			blocks = blocks.filter((block: SessionBlock) => block.isActive);
 			if (blocks.length === 0) {
 				if (useJson) {
@@ -243,9 +246,9 @@ export const blocksCommand = define({
 						burnRate,
 						projection,
 						tokenLimitStatus:
-							projection != null && ctx.values.tokenLimit != null
+							projection != null && mergedOptions.tokenLimit != null
 								? (() => {
-										const limit = parseTokenLimit(ctx.values.tokenLimit, maxTokensFromAll);
+										const limit = parseTokenLimit(mergedOptions.tokenLimit, maxTokensFromAll);
 										return limit != null
 											? {
 													limit,
@@ -267,8 +270,8 @@ export const blocksCommand = define({
 			};
 
 			// Process with jq if specified
-			if (ctx.values.jq != null) {
-				const jqResult = await processWithJq(jsonOutput, ctx.values.jq);
+			if (mergedOptions.jq != null) {
+				const jqResult = await processWithJq(jsonOutput, mergedOptions.jq);
 				if (Result.isFailure(jqResult)) {
 					logger.error(jqResult.error.message);
 					process.exit(1);
@@ -279,7 +282,7 @@ export const blocksCommand = define({
 			}
 		} else {
 			// Table output
-			if (ctx.values.active && blocks.length === 1) {
+			if (mergedOptions.active && blocks.length === 1) {
 				// Detailed active block view
 				const block = blocks[0] as SessionBlock;
 				if (block == null) {
@@ -316,9 +319,9 @@ export const blocksCommand = define({
 					log(`  Total Tokens:     ${formatNumber(projection.totalTokens)}`);
 					log(`  Total Cost:       ${formatCurrency(projection.totalCost)}\n`);
 
-					if (ctx.values.tokenLimit != null) {
+					if (mergedOptions.tokenLimit != null) {
 						// Parse token limit
-						const limit = parseTokenLimit(ctx.values.tokenLimit, maxTokensFromAll);
+						const limit = parseTokenLimit(mergedOptions.tokenLimit, maxTokensFromAll);
 						if (limit != null && limit > 0) {
 							const currentTokens = getTotalTokens(block.tokenCounts);
 							const remainingTokens = Math.max(0, limit - currentTokens);
@@ -345,7 +348,7 @@ export const blocksCommand = define({
 				logger.box('Claude Code Token Usage Report - Session Blocks');
 
 				// Calculate token limit if "max" is specified
-				const actualTokenLimit = parseTokenLimit(ctx.values.tokenLimit, maxTokensFromAll);
+				const actualTokenLimit = parseTokenLimit(mergedOptions.tokenLimit, maxTokensFromAll);
 
 				const tableHeaders = ['Block Start', 'Duration/Status', 'Models', 'Tokens'];
 				const tableAligns: ('left' | 'right' | 'center')[] = ['left', 'left', 'left', 'right'];
@@ -371,13 +374,13 @@ export const blocksCommand = define({
 				// 2. Terminal width is below threshold
 				const terminalWidth = process.stdout.columns || BLOCKS_DEFAULT_TERMINAL_WIDTH;
 				const isNarrowTerminal = terminalWidth < BLOCKS_COMPACT_WIDTH_THRESHOLD;
-				const useCompactFormat = ctx.values.compact || isNarrowTerminal;
+				const useCompactFormat = mergedOptions.compact || isNarrowTerminal;
 
 				for (const block of blocks) {
 					if (block.isGap ?? false) {
 						// Gap row
 						const gapRow = [
-							pc.gray(formatBlockTime(block, useCompactFormat, ctx.values.locale)),
+							pc.gray(formatBlockTime(block, useCompactFormat, mergedOptions.locale)),
 							pc.gray('(inactive)'),
 							pc.gray('-'),
 							pc.gray('-'),
@@ -392,7 +395,7 @@ export const blocksCommand = define({
 						const status = block.isActive ? pc.green('ACTIVE') : '';
 
 						const row = [
-							formatBlockTime(block, useCompactFormat, ctx.values.locale),
+							formatBlockTime(block, useCompactFormat, mergedOptions.locale),
 							status,
 							formatModels(block.models),
 							formatNumber(totalTokens),
@@ -474,3 +477,118 @@ export const blocksCommand = define({
 		}
 	},
 });
+
+if (import.meta.vitest != null) {
+	describe('blocksCommand', () => {
+		afterEach(() => {
+			vi.restoreAllMocks();
+			vi.unstubAllEnvs();
+		});
+
+		it('uses merged config for loading and filtering blocks', async () => {
+			vi.spyOn(configLoaderModule, 'loadConfig').mockReturnValue(undefined);
+			vi.spyOn(configLoaderModule, 'mergeConfigWithArgs').mockReturnValue({
+				config: '/tmp/config.json',
+				debug: false,
+				debugSamples: 5,
+				json: true,
+				jq: undefined,
+				since: '20240115',
+				until: undefined,
+				mode: 'display',
+				order: 'desc',
+				offline: true,
+				timezone: 'UTC',
+				locale: 'en-US',
+				compact: false,
+				active: false,
+				recent: true,
+				tokenLimit: undefined,
+				sessionLength: 12,
+			});
+
+			const recentBlock: SessionBlock = {
+				id: 'recent',
+				startTime: new Date(),
+				endTime: new Date(Date.now() + 60 * 60 * 1000),
+				actualEndTime: new Date(),
+				isActive: false,
+				entries: [],
+				tokenCounts: {
+					inputTokens: 100,
+					outputTokens: 50,
+					cacheCreationInputTokens: 0,
+					cacheReadInputTokens: 0,
+				},
+				costUSD: 0.01,
+				models: ['claude-sonnet-4-20250514'],
+			};
+			const oldBlock: SessionBlock = {
+				id: 'old',
+				startTime: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000),
+				endTime: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000 + 60 * 60 * 1000),
+				actualEndTime: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000),
+				isActive: false,
+				entries: [],
+				tokenCounts: {
+					inputTokens: 200,
+					outputTokens: 100,
+					cacheCreationInputTokens: 0,
+					cacheReadInputTokens: 0,
+				},
+				costUSD: 0.02,
+				models: ['claude-opus-4-20250514'],
+			};
+
+			const loadSessionBlockDataSpy = vi
+				.spyOn(dataLoaderModule, 'loadSessionBlockData')
+				.mockResolvedValue([oldBlock, recentBlock]);
+			const logSpy = vi.spyOn(loggerModule, 'log').mockImplementation(() => {});
+
+			if (blocksCommand.run == null) {
+				throw new Error('blocksCommand.run is not defined');
+			}
+
+			await blocksCommand.run({
+				name: 'blocks',
+				tokens: [],
+				values: {
+					config: undefined,
+					debug: false,
+					debugSamples: 5,
+					json: false,
+					jq: undefined,
+					since: undefined,
+					until: undefined,
+					mode: 'auto',
+					order: 'asc',
+					offline: false,
+					timezone: undefined,
+					locale: 'en-CA',
+					compact: false,
+					active: false,
+					recent: false,
+					tokenLimit: undefined,
+					sessionLength: DEFAULT_SESSION_DURATION_HOURS,
+				},
+			} as never);
+
+			expect(loadSessionBlockDataSpy).toHaveBeenCalledWith({
+				since: '20240115',
+				until: undefined,
+				mode: 'display',
+				order: 'desc',
+				offline: true,
+				sessionDurationHours: 12,
+				timezone: 'UTC',
+				locale: 'en-US',
+			});
+
+			const output = JSON.parse(String(logSpy.mock.calls[0]?.[0])) as {
+				blocks: Array<{ id: string }>;
+			};
+			expect(output.blocks).toHaveLength(1);
+			expect(output.blocks[0]?.id).toBe('recent');
+		});
+	});
+}

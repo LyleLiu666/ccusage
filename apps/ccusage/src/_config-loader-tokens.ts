@@ -55,8 +55,15 @@ export type ConfigData = {
  * 2. User config directories from getClaudePaths() + ccusage.json
  */
 function getConfigSearchPaths(): string[] {
-	const claudeConfigDirs = [join(process.cwd(), '.ccusage'), ...toArray(getClaudePaths())];
-	return claudeConfigDirs.map((dir) => join(dir, CONFIG_FILE_NAME));
+	const configDirs = [join(process.cwd(), '.ccusage')];
+
+	try {
+		configDirs.push(...toArray(getClaudePaths()));
+	} catch (error) {
+		logger.debug('Skipping Claude config directory discovery during config search:', error);
+	}
+
+	return configDirs.map((dir) => join(dir, CONFIG_FILE_NAME));
 }
 
 /**
@@ -402,6 +409,7 @@ if (import.meta.vitest != null) {
 
 		afterEach(() => {
 			vi.restoreAllMocks();
+			vi.unstubAllEnvs();
 		});
 
 		it('should load valid configuration from .ccusage/ccusage.json', async () => {
@@ -473,6 +481,22 @@ if (import.meta.vitest != null) {
 			expect(config).toBeDefined();
 			expect(config?.defaults?.json).toBe(true);
 			expect(config?.commands?.daily?.priority).toBe('local');
+		});
+
+		it('should still load local config when CLAUDE_CONFIG_DIR is invalid', async () => {
+			await using fixture = await createFixture({
+				'.ccusage/ccusage.json': JSON.stringify({
+					defaults: { json: true },
+				}),
+			});
+
+			vi.spyOn(process, 'cwd').mockReturnValue(fixture.getPath());
+			vi.stubEnv('CLAUDE_CONFIG_DIR', '/definitely/missing');
+
+			const config = loadConfig();
+
+			expect(config).toBeDefined();
+			expect(config?.defaults?.json).toBe(true);
 		});
 
 		it('should test configuration priority order with multiple files', async () => {

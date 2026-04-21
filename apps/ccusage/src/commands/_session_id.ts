@@ -5,7 +5,10 @@ import { formatCurrency, formatNumber, ResponsiveTable } from '@ccusage/terminal
 import { Result } from '@praha/byethrow';
 import { formatDateCompact } from '../_date-utils.ts';
 import { processWithJq } from '../_jq-processor.ts';
+import { createISOTimestamp, createModelName, createSessionId } from '../_types.ts';
+import * as dataLoaderModule from '../data-loader.ts';
 import { loadSessionUsageById } from '../data-loader.ts';
+import * as loggerModule from '../logger.ts';
 import { log, logger } from '../logger.ts';
 
 export type SessionIdContext = {
@@ -52,7 +55,7 @@ export async function handleSessionIdLookup(
 				cacheCreationTokens: entry.message.usage.cache_creation_input_tokens ?? 0,
 				cacheReadTokens: entry.message.usage.cache_read_input_tokens ?? 0,
 				model: entry.message.model ?? 'unknown',
-				costUSD: entry.costUSD ?? 0,
+				costUSD: entry.resolvedCost,
 			})),
 		};
 
@@ -91,7 +94,7 @@ export async function handleSessionIdLookup(
 					formatNumber(entry.message.usage.output_tokens),
 					formatNumber(entry.message.usage.cache_creation_input_tokens ?? 0),
 					formatNumber(entry.message.usage.cache_read_input_tokens ?? 0),
-					formatCurrency(entry.costUSD ?? 0),
+					formatCurrency(entry.resolvedCost),
 				]);
 			}
 
@@ -111,4 +114,50 @@ function calculateSessionTotalTokens(entries: UsageData[]): number {
 			(usage.cache_read_input_tokens ?? 0)
 		);
 	}, 0);
+}
+
+if (import.meta.vitest != null) {
+	describe('handleSessionIdLookup', () => {
+		afterEach(() => {
+			vi.restoreAllMocks();
+		});
+
+		it('uses calculated entry costs in JSON output when costUSD is missing', async () => {
+			vi.spyOn(dataLoaderModule, 'loadSessionUsageById').mockResolvedValue({
+				totalCost: 0.0105,
+				entries: [
+					{
+						timestamp: createISOTimestamp('2024-01-01T00:00:00Z'),
+						sessionId: createSessionId('session-123'),
+						message: {
+							usage: {
+								input_tokens: 1000,
+								output_tokens: 500,
+							},
+							model: createModelName('claude-sonnet-4-20250514'),
+						},
+						resolvedCost: 0.0105,
+					},
+				],
+			});
+			const logSpy = vi.spyOn(loggerModule, 'log').mockImplementation(() => {});
+
+			await handleSessionIdLookup(
+				{
+					values: {
+						id: 'session-123',
+						mode: 'calculate',
+						offline: true,
+						locale: 'en-US',
+					},
+				},
+				true,
+			);
+
+			const output = JSON.parse(String(logSpy.mock.calls[0]?.[0])) as {
+				entries: Array<{ costUSD: number }>;
+			};
+			expect(output.entries[0]?.costUSD).toBe(0.0105);
+		});
+	});
 }

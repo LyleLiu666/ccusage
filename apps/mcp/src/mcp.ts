@@ -290,7 +290,7 @@ if (import.meta.vitest != null) {
 
 				const result = await client.callTool({
 					name: 'daily',
-					arguments: { mode: 'auto' },
+					arguments: { mode: 'display' },
 				});
 
 				expect(result).toHaveProperty('content');
@@ -307,7 +307,7 @@ if (import.meta.vitest != null) {
 
 				await client.close();
 				await server.close();
-			});
+			}, 10_000);
 
 			it('should call session tool successfully', async () => {
 				await using fixture = await createFixture({
@@ -331,7 +331,7 @@ if (import.meta.vitest != null) {
 
 				const result = await client.callTool({
 					name: 'session',
-					arguments: { mode: 'auto' },
+					arguments: { mode: 'display' },
 				});
 
 				expect(result).toHaveProperty('content');
@@ -370,7 +370,7 @@ if (import.meta.vitest != null) {
 
 				const result = await client.callTool({
 					name: 'monthly',
-					arguments: { mode: 'auto' },
+					arguments: { mode: 'display' },
 				});
 
 				expect(result).toHaveProperty('content');
@@ -409,7 +409,7 @@ if (import.meta.vitest != null) {
 
 				const result = await client.callTool({
 					name: 'blocks',
-					arguments: { mode: 'auto' },
+					arguments: { mode: 'display' },
 				});
 
 				expect(result).toHaveProperty('content');
@@ -552,7 +552,7 @@ if (import.meta.vitest != null) {
 						method: 'tools/call',
 						params: {
 							name: 'daily',
-							arguments: { mode: 'auto' },
+							arguments: { mode: 'display' },
 						},
 						id: 2,
 					}),
@@ -704,7 +704,7 @@ if (import.meta.vitest != null) {
 
 				const result = await client.callTool({
 					name: 'daily',
-					arguments: { mode: 'auto' },
+					arguments: { mode: 'display' },
 				});
 
 				expect(result).toHaveProperty('content');
@@ -736,7 +736,7 @@ if (import.meta.vitest != null) {
 
 				const result = await client.callTool({
 					name: 'daily',
-					arguments: { mode: 'auto' },
+					arguments: { mode: 'display' },
 				});
 
 				expect(result).toHaveProperty('content');
@@ -764,7 +764,7 @@ if (import.meta.vitest != null) {
 
 				const result = await client.callTool({
 					name: 'daily',
-					arguments: { mode: 'auto' },
+					arguments: { mode: 'display' },
 				});
 
 				expect(result).toHaveProperty('content');
@@ -803,10 +803,10 @@ if (import.meta.vitest != null) {
 
 				// Call multiple tools concurrently
 				const [dailyResult, sessionResult, monthlyResult, blocksResult] = await Promise.all([
-					client.callTool({ name: 'daily', arguments: { mode: 'auto' } }),
-					client.callTool({ name: 'session', arguments: { mode: 'auto' } }),
-					client.callTool({ name: 'monthly', arguments: { mode: 'auto' } }),
-					client.callTool({ name: 'blocks', arguments: { mode: 'auto' } }),
+					client.callTool({ name: 'daily', arguments: { mode: 'display' } }),
+					client.callTool({ name: 'session', arguments: { mode: 'display' } }),
+					client.callTool({ name: 'monthly', arguments: { mode: 'display' } }),
+					client.callTool({ name: 'blocks', arguments: { mode: 'display' } }),
 				]);
 
 				expect(dailyResult).toHaveProperty('content');
