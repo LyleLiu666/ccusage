@@ -42,6 +42,12 @@ export const sharedArgs = {
 		description: 'Force compact table layout for narrow terminals',
 		default: false,
 	},
+	breakdown: {
+		type: 'boolean',
+		short: 'b',
+		description: 'Show extra per-model token and cost breakdown rows, including totals',
+		default: false,
+	},
 	color: {
 		// --color and FORCE_COLOR=1 is handled by picocolors
 		type: 'boolean',

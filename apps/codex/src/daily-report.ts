@@ -62,6 +62,7 @@ export async function buildDailyReport(
 		addUsage(summary, event);
 		const modelUsage: ModelUsage = summary.models.get(modelName) ?? {
 			...createEmptyUsage(),
+			costUSD: 0,
 			isFallback: false,
 		};
 		if (!summary.models.has(modelName)) {
@@ -97,7 +98,9 @@ export async function buildDailyReport(
 			if (pricing == null) {
 				continue;
 			}
-			cost += calculateCostUSD(usage, pricing);
+			const modelCost = calculateCostUSD(usage, pricing);
+			usage.costUSD = modelCost;
+			cost += modelCost;
 		}
 		summary.costUSD = cost;
 
@@ -192,14 +195,14 @@ if (import.meta.vitest != null) {
 			expect(first.reasoningOutputTokens).toBe(50);
 			// gpt-5: 800 non-cached input @ 1.25, 200 cached @ 0.125, 500 output @ 10
 			// gpt-5-mini: 300 non-cached input @ 0.6, 100 cached @ 0.06, 200 output @ 2 (reasoning already included)
-			const expectedCost =
-				(800 / 1_000_000) * 1.25 +
-				(200 / 1_000_000) * 0.125 +
-				(500 / 1_000_000) * 10 +
-				(300 / 1_000_000) * 0.6 +
-				(100 / 1_000_000) * 0.06 +
-				(200 / 1_000_000) * 2;
+			const expectedGpt5Cost =
+				(800 / 1_000_000) * 1.25 + (200 / 1_000_000) * 0.125 + (500 / 1_000_000) * 10;
+			const expectedMiniCost =
+				(300 / 1_000_000) * 0.6 + (100 / 1_000_000) * 0.06 + (200 / 1_000_000) * 2;
+			const expectedCost = expectedGpt5Cost + expectedMiniCost;
 			expect(first.costUSD).toBeCloseTo(expectedCost, 10);
+			expect(first.models['gpt-5']?.costUSD).toBeCloseTo(expectedGpt5Cost, 10);
+			expect(first.models['gpt-5-mini']?.costUSD).toBeCloseTo(expectedMiniCost, 10);
 		});
 	});
 }

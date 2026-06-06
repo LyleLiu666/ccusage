@@ -92,6 +92,7 @@ export async function buildSessionReport(
 
 		const modelUsage: ModelUsage = summary.models.get(modelName) ?? {
 			...createEmptyUsage(),
+			costUSD: 0,
 			isFallback: false,
 		};
 		if (!summary.models.has(modelName)) {
@@ -131,7 +132,9 @@ export async function buildSessionReport(
 			if (pricing == null) {
 				continue;
 			}
-			cost += calculateCostUSD(usage, pricing);
+			const modelCost = calculateCostUSD(usage, pricing);
+			usage.costUSD = modelCost;
+			cost += modelCost;
 		}
 		summary.costUSD = cost;
 

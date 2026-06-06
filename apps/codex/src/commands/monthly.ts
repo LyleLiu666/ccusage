@@ -11,7 +11,12 @@ import { define } from 'gunshi';
 import pc from 'picocolors';
 import { DEFAULT_TIMEZONE } from '../_consts.ts';
 import { sharedArgs } from '../_shared-args.ts';
-import { formatModelsList, splitUsageTokens } from '../command-utils.ts';
+import {
+	calculateCodexReportTotals,
+	formatModelsList,
+	pushCodexModelBreakdownRows,
+	splitUsageTokens,
+} from '../command-utils.ts';
 import { loadTokenUsageEvents } from '../data-loader.ts';
 import { normalizeFilterDate, toFilterStartTimestamp } from '../date-utils.ts';
 import { log, logger } from '../logger.ts';
@@ -19,6 +24,26 @@ import { buildMonthlyReport } from '../monthly-report.ts';
 import { CodexPricingSource } from '../pricing.ts';
 
 const TABLE_COLUMN_COUNT = 8;
+const MODEL_BREAKDOWN_COLUMNS = {
+	totalColumns: TABLE_COLUMN_COUNT,
+	labelColumn: 1,
+	inputColumn: 2,
+	outputColumn: 3,
+	reasoningColumn: 4,
+	cacheReadColumn: 5,
+	totalTokensColumn: 6,
+	costColumn: 7,
+};
+
+function getMonthlyModelBreakdownVisibility(values: { breakdown?: boolean }): {
+	showRowBreakdown: boolean;
+	showTotalBreakdown: boolean;
+} {
+	return {
+		showRowBreakdown: true,
+		showTotalBreakdown: values.breakdown === true,
+	};
+}
 
 export const monthlyCommand = define({
 	name: 'monthly',
@@ -79,25 +104,7 @@ export const monthlyCommand = define({
 				return;
 			}
 
-			const totals = rows.reduce(
-				(acc, row) => {
-					acc.inputTokens += row.inputTokens;
-					acc.cachedInputTokens += row.cachedInputTokens;
-					acc.outputTokens += row.outputTokens;
-					acc.reasoningOutputTokens += row.reasoningOutputTokens;
-					acc.totalTokens += row.totalTokens;
-					acc.costUSD += row.costUSD;
-					return acc;
-				},
-				{
-					inputTokens: 0,
-					cachedInputTokens: 0,
-					outputTokens: 0,
-					reasoningOutputTokens: 0,
-					totalTokens: 0,
-					costUSD: 0,
-				},
-			);
+			const totals = calculateCodexReportTotals(rows);
 
 			if (jsonOutput) {
 				log(
@@ -136,28 +143,15 @@ export const monthlyCommand = define({
 				style: { head: ['cyan'] },
 				dateFormatter: (dateStr: string) => formatDateCompact(dateStr),
 			});
-
-			const totalsForDisplay = {
-				inputTokens: 0,
-				outputTokens: 0,
-				reasoningTokens: 0,
-				cacheReadTokens: 0,
-				totalTokens: 0,
-				costUSD: 0,
-			};
+			const modelBreakdownVisibility = getMonthlyModelBreakdownVisibility(ctx.values);
+			const showRowBreakdown = modelBreakdownVisibility.showRowBreakdown;
 
 			for (const row of rows) {
 				const split = splitUsageTokens(row);
-				totalsForDisplay.inputTokens += split.inputTokens;
-				totalsForDisplay.outputTokens += split.outputTokens;
-				totalsForDisplay.reasoningTokens += split.reasoningTokens;
-				totalsForDisplay.cacheReadTokens += split.cacheReadTokens;
-				totalsForDisplay.totalTokens += row.totalTokens;
-				totalsForDisplay.costUSD += row.costUSD;
 
 				table.push([
 					row.month,
-					formatModelsDisplayMultiline(formatModelsList(row.models)),
+					showRowBreakdown ? '' : formatModelsDisplayMultiline(formatModelsList(row.models)),
 					formatNumber(split.inputTokens),
 					formatNumber(split.outputTokens),
 					formatNumber(split.reasoningTokens),
@@ -165,19 +159,26 @@ export const monthlyCommand = define({
 					formatNumber(row.totalTokens),
 					formatCurrency(row.costUSD),
 				]);
+				if (showRowBreakdown) {
+					pushCodexModelBreakdownRows(table, row.models, MODEL_BREAKDOWN_COLUMNS);
+				}
 			}
 
+			const totalsSplit = splitUsageTokens(totals);
 			addEmptySeparatorRow(table, TABLE_COLUMN_COUNT);
 			table.push([
 				pc.yellow('Total'),
 				'',
-				pc.yellow(formatNumber(totalsForDisplay.inputTokens)),
-				pc.yellow(formatNumber(totalsForDisplay.outputTokens)),
-				pc.yellow(formatNumber(totalsForDisplay.reasoningTokens)),
-				pc.yellow(formatNumber(totalsForDisplay.cacheReadTokens)),
-				pc.yellow(formatNumber(totalsForDisplay.totalTokens)),
-				pc.yellow(formatCurrency(totalsForDisplay.costUSD)),
+				pc.yellow(formatNumber(totalsSplit.inputTokens)),
+				pc.yellow(formatNumber(totalsSplit.outputTokens)),
+				pc.yellow(formatNumber(totalsSplit.reasoningTokens)),
+				pc.yellow(formatNumber(totalsSplit.cacheReadTokens)),
+				pc.yellow(formatNumber(totals.totalTokens)),
+				pc.yellow(formatCurrency(totals.costUSD)),
 			]);
+			if (modelBreakdownVisibility.showTotalBreakdown) {
+				pushCodexModelBreakdownRows(table, totals.models, MODEL_BREAKDOWN_COLUMNS);
+			}
 
 			log(table.toString());
 
@@ -190,3 +191,21 @@ export const monthlyCommand = define({
 		}
 	},
 });
+
+if (import.meta.vitest != null) {
+	describe('getMonthlyModelBreakdownVisibility', () => {
+		it('shows per-month model breakdown by default without expanding totals', () => {
+			expect(getMonthlyModelBreakdownVisibility({ breakdown: false })).toEqual({
+				showRowBreakdown: true,
+				showTotalBreakdown: false,
+			});
+		});
+
+		it('also expands totals when explicitly requested', () => {
+			expect(getMonthlyModelBreakdownVisibility({ breakdown: true })).toEqual({
+				showRowBreakdown: true,
+				showTotalBreakdown: true,
+			});
+		});
+	});
+}

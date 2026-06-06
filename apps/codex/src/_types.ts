@@ -18,6 +18,7 @@ export type TokenUsageEvent = TokenUsageDelta & {
 };
 
 export type ModelUsage = TokenUsageDelta & {
+	costUSD: number;
 	isFallback?: boolean;
 };
 

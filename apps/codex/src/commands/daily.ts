@@ -11,7 +11,12 @@ import { define } from 'gunshi';
 import pc from 'picocolors';
 import { DEFAULT_TIMEZONE } from '../_consts.ts';
 import { sharedArgs } from '../_shared-args.ts';
-import { formatModelsList, splitUsageTokens } from '../command-utils.ts';
+import {
+	calculateCodexReportTotals,
+	formatModelsList,
+	pushCodexModelBreakdownRows,
+	splitUsageTokens,
+} from '../command-utils.ts';
 import { buildDailyReport } from '../daily-report.ts';
 import { loadTokenUsageEvents } from '../data-loader.ts';
 import { normalizeFilterDate, toDateKey, toFilterStartTimestamp } from '../date-utils.ts';
@@ -19,6 +24,45 @@ import { log, logger } from '../logger.ts';
 import { CodexPricingSource } from '../pricing.ts';
 
 const TABLE_COLUMN_COUNT = 8;
+const MODEL_BREAKDOWN_COLUMNS = {
+	totalColumns: TABLE_COLUMN_COUNT,
+	labelColumn: 1,
+	inputColumn: 2,
+	outputColumn: 3,
+	reasoningColumn: 4,
+	cacheReadColumn: 5,
+	totalTokensColumn: 6,
+	costColumn: 7,
+};
+
+function getDailyModelBreakdownVisibility(values: { breakdown?: boolean; week?: boolean }): {
+	showRowBreakdown: boolean;
+	showTotalBreakdown: boolean;
+} {
+	const showRowBreakdown = values.breakdown === true || values.week === true;
+	return {
+		showRowBreakdown,
+		showTotalBreakdown: values.breakdown === true,
+	};
+}
+
+function subtractCalendarDays(dateKey: string, days: number): string {
+	const [yearStr = '0', monthStr = '1', dayStr = '1'] = dateKey.split('-');
+	const date = new Date(
+		Date.UTC(
+			Number.parseInt(yearStr, 10),
+			Number.parseInt(monthStr, 10) - 1,
+			Number.parseInt(dayStr, 10),
+		),
+	);
+	date.setUTCDate(date.getUTCDate() - days);
+	return date.toISOString().slice(0, 10);
+}
+
+function getLastSevenCalendarDaysStartDate(now: number, timezone?: string): string {
+	const today = toDateKey(new Date(now).toISOString(), timezone);
+	return subtractCalendarDays(today, 6);
+}
 
 export const dailyCommand = define({
 	name: 'daily',
@@ -44,10 +88,8 @@ export const dailyCommand = define({
 
 		try {
 			if (ctx.values.week) {
-				const now = Date.now();
-				const oneWeekAgo = now - 7 * 24 * 60 * 60 * 1000;
-				sinceTimestamp = oneWeekAgo;
-				since = toDateKey(new Date(oneWeekAgo).toISOString(), ctx.values.timezone);
+				since = getLastSevenCalendarDaysStartDate(Date.now(), ctx.values.timezone);
+				sinceTimestamp = toFilterStartTimestamp(since, ctx.values.timezone);
 			} else {
 				since = normalizeFilterDate(ctx.values.since);
 				if (since != null) {
@@ -92,25 +134,7 @@ export const dailyCommand = define({
 				return;
 			}
 
-			const totals = rows.reduce(
-				(acc, row) => {
-					acc.inputTokens += row.inputTokens;
-					acc.cachedInputTokens += row.cachedInputTokens;
-					acc.outputTokens += row.outputTokens;
-					acc.reasoningOutputTokens += row.reasoningOutputTokens;
-					acc.totalTokens += row.totalTokens;
-					acc.costUSD += row.costUSD;
-					return acc;
-				},
-				{
-					inputTokens: 0,
-					cachedInputTokens: 0,
-					outputTokens: 0,
-					reasoningOutputTokens: 0,
-					totalTokens: 0,
-					costUSD: 0,
-				},
-			);
+			const totals = calculateCodexReportTotals(rows);
 
 			if (jsonOutput) {
 				log(
@@ -149,28 +173,15 @@ export const dailyCommand = define({
 				style: { head: ['cyan'] },
 				dateFormatter: (dateStr: string) => formatDateCompact(dateStr),
 			});
-
-			const totalsForDisplay = {
-				inputTokens: 0,
-				outputTokens: 0,
-				reasoningTokens: 0,
-				cacheReadTokens: 0,
-				totalTokens: 0,
-				costUSD: 0,
-			};
+			const modelBreakdownVisibility = getDailyModelBreakdownVisibility(ctx.values);
+			const showRowBreakdown = modelBreakdownVisibility.showRowBreakdown;
 
 			for (const row of rows) {
 				const split = splitUsageTokens(row);
-				totalsForDisplay.inputTokens += split.inputTokens;
-				totalsForDisplay.outputTokens += split.outputTokens;
-				totalsForDisplay.reasoningTokens += split.reasoningTokens;
-				totalsForDisplay.cacheReadTokens += split.cacheReadTokens;
-				totalsForDisplay.totalTokens += row.totalTokens;
-				totalsForDisplay.costUSD += row.costUSD;
 
 				table.push([
 					row.date,
-					formatModelsDisplayMultiline(formatModelsList(row.models)),
+					showRowBreakdown ? '' : formatModelsDisplayMultiline(formatModelsList(row.models)),
 					formatNumber(split.inputTokens),
 					formatNumber(split.outputTokens),
 					formatNumber(split.reasoningTokens),
@@ -178,19 +189,26 @@ export const dailyCommand = define({
 					formatNumber(row.totalTokens),
 					formatCurrency(row.costUSD),
 				]);
+				if (showRowBreakdown) {
+					pushCodexModelBreakdownRows(table, row.models, MODEL_BREAKDOWN_COLUMNS);
+				}
 			}
 
+			const totalsSplit = splitUsageTokens(totals);
 			addEmptySeparatorRow(table, TABLE_COLUMN_COUNT);
 			table.push([
 				pc.yellow('Total'),
 				'',
-				pc.yellow(formatNumber(totalsForDisplay.inputTokens)),
-				pc.yellow(formatNumber(totalsForDisplay.outputTokens)),
-				pc.yellow(formatNumber(totalsForDisplay.reasoningTokens)),
-				pc.yellow(formatNumber(totalsForDisplay.cacheReadTokens)),
-				pc.yellow(formatNumber(totalsForDisplay.totalTokens)),
-				pc.yellow(formatCurrency(totalsForDisplay.costUSD)),
+				pc.yellow(formatNumber(totalsSplit.inputTokens)),
+				pc.yellow(formatNumber(totalsSplit.outputTokens)),
+				pc.yellow(formatNumber(totalsSplit.reasoningTokens)),
+				pc.yellow(formatNumber(totalsSplit.cacheReadTokens)),
+				pc.yellow(formatNumber(totals.totalTokens)),
+				pc.yellow(formatCurrency(totals.costUSD)),
 			]);
+			if (modelBreakdownVisibility.showTotalBreakdown) {
+				pushCodexModelBreakdownRows(table, totals.models, MODEL_BREAKDOWN_COLUMNS);
+			}
 
 			log(table.toString());
 
@@ -203,3 +221,45 @@ export const dailyCommand = define({
 		}
 	},
 });
+
+if (import.meta.vitest != null) {
+	describe('getLastSevenCalendarDaysStartDate', () => {
+		it('returns the first date of the 7-day calendar window in the target timezone', () => {
+			expect(
+				getLastSevenCalendarDaysStartDate(
+					new Date('2026-06-06T01:00:00.000Z').getTime(),
+					'Asia/Shanghai',
+				),
+			).toBe('2026-05-31');
+		});
+
+		it('handles month boundaries', () => {
+			expect(
+				getLastSevenCalendarDaysStartDate(new Date('2026-03-01T12:00:00.000Z').getTime(), 'UTC'),
+			).toBe('2026-02-23');
+		});
+	});
+
+	describe('getDailyModelBreakdownVisibility', () => {
+		it('shows per-day model breakdown for weekly reports without expanding totals by default', () => {
+			expect(getDailyModelBreakdownVisibility({ week: true, breakdown: false })).toEqual({
+				showRowBreakdown: true,
+				showTotalBreakdown: false,
+			});
+		});
+
+		it('shows row and total model breakdown when explicitly requested', () => {
+			expect(getDailyModelBreakdownVisibility({ week: false, breakdown: true })).toEqual({
+				showRowBreakdown: true,
+				showTotalBreakdown: true,
+			});
+		});
+
+		it('keeps regular daily reports compact by default', () => {
+			expect(getDailyModelBreakdownVisibility({ week: false, breakdown: false })).toEqual({
+				showRowBreakdown: false,
+				showTotalBreakdown: false,
+			});
+		});
+	});
+}

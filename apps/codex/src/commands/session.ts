@@ -11,7 +11,13 @@ import { define } from 'gunshi';
 import pc from 'picocolors';
 import { DEFAULT_TIMEZONE } from '../_consts.ts';
 import { sharedArgs } from '../_shared-args.ts';
-import { formatModelsList, splitUsageTokens } from '../command-utils.ts';
+import {
+	calculateCodexReportTotals,
+	formatCodexModelBreakdownRows,
+	formatModelsList,
+	pushCodexModelBreakdownRows,
+	splitUsageTokens,
+} from '../command-utils.ts';
 import { loadTokenUsageEvents } from '../data-loader.ts';
 import {
 	formatDisplayDate,
@@ -25,6 +31,26 @@ import { CodexPricingSource } from '../pricing.ts';
 import { buildSessionReport } from '../session-report.ts';
 
 const TABLE_COLUMN_COUNT = 12;
+const MODEL_BREAKDOWN_COLUMNS = {
+	totalColumns: TABLE_COLUMN_COUNT,
+	labelColumn: 4,
+	inputColumn: 5,
+	outputColumn: 6,
+	reasoningColumn: 7,
+	cacheReadColumn: 8,
+	totalTokensColumn: 9,
+	costColumn: 10,
+};
+
+function getSessionModelBreakdownVisibility(values: { breakdown?: boolean }): {
+	showRowBreakdown: boolean;
+	showTotalBreakdown: boolean;
+} {
+	return {
+		showRowBreakdown: true,
+		showTotalBreakdown: values.breakdown === true,
+	};
+}
 
 function formatStorageSourceLabel(storageSource: string): string {
 	if (storageSource === 'archived') {
@@ -113,25 +139,7 @@ export const sessionCommand = define({
 				return;
 			}
 
-			const totals = rows.reduce(
-				(acc, row) => {
-					acc.inputTokens += row.inputTokens;
-					acc.cachedInputTokens += row.cachedInputTokens;
-					acc.outputTokens += row.outputTokens;
-					acc.reasoningOutputTokens += row.reasoningOutputTokens;
-					acc.totalTokens += row.totalTokens;
-					acc.costUSD += row.costUSD;
-					return acc;
-				},
-				{
-					inputTokens: 0,
-					cachedInputTokens: 0,
-					outputTokens: 0,
-					reasoningOutputTokens: 0,
-					totalTokens: 0,
-					costUSD: 0,
-				},
-			);
+			const totals = calculateCodexReportTotals(rows);
 
 			if (jsonOutput) {
 				log(
@@ -180,31 +188,18 @@ export const sessionCommand = define({
 					'right',
 					'left',
 				],
-				compactHead: ['Dates', 'Source', 'Session', 'Input', 'Output', 'Cost (USD)'],
-				compactColAligns: ['left', 'left', 'left', 'right', 'right', 'right'],
+				compactHead: ['Dates', 'Source', 'Session', 'Models', 'Input', 'Output', 'Cost (USD)'],
+				compactColAligns: ['left', 'left', 'left', 'left', 'right', 'right', 'right'],
 				compactThreshold: 100,
 				forceCompact: ctx.values.compact,
 				style: { head: ['cyan'] },
 				dateFormatter: (dateStr: string) => formatDateCompact(dateStr),
 			});
-
-			const totalsForDisplay = {
-				inputTokens: 0,
-				outputTokens: 0,
-				reasoningTokens: 0,
-				cacheReadTokens: 0,
-				totalTokens: 0,
-				costUSD: 0,
-			};
+			const modelBreakdownVisibility = getSessionModelBreakdownVisibility(ctx.values);
+			const showRowBreakdown = modelBreakdownVisibility.showRowBreakdown;
 
 			for (const row of rows) {
 				const split = splitUsageTokens(row);
-				totalsForDisplay.inputTokens += split.inputTokens;
-				totalsForDisplay.outputTokens += split.outputTokens;
-				totalsForDisplay.reasoningTokens += split.reasoningTokens;
-				totalsForDisplay.cacheReadTokens += split.cacheReadTokens;
-				totalsForDisplay.totalTokens += row.totalTokens;
-				totalsForDisplay.costUSD += row.costUSD;
 
 				const displayDate = formatSessionDateRange(
 					row.firstActivity,
@@ -221,7 +216,7 @@ export const sessionCommand = define({
 					formatStorageSourceLabel(row.storageSource),
 					directoryDisplay,
 					shortSession,
-					formatModelsDisplayMultiline(formatModelsList(row.models)),
+					showRowBreakdown ? '' : formatModelsDisplayMultiline(formatModelsList(row.models)),
 					formatNumber(split.inputTokens),
 					formatNumber(split.outputTokens),
 					formatNumber(split.reasoningTokens),
@@ -230,8 +225,12 @@ export const sessionCommand = define({
 					formatCurrency(row.costUSD),
 					formatDisplayDateTime(row.lastActivity, ctx.values.locale, ctx.values.timezone),
 				]);
+				if (showRowBreakdown) {
+					pushCodexModelBreakdownRows(table, row.models, MODEL_BREAKDOWN_COLUMNS);
+				}
 			}
 
+			const totalsSplit = splitUsageTokens(totals);
 			addEmptySeparatorRow(table, TABLE_COLUMN_COUNT);
 			table.push([
 				'',
@@ -239,14 +238,17 @@ export const sessionCommand = define({
 				'',
 				pc.yellow('Total'),
 				'',
-				pc.yellow(formatNumber(totalsForDisplay.inputTokens)),
-				pc.yellow(formatNumber(totalsForDisplay.outputTokens)),
-				pc.yellow(formatNumber(totalsForDisplay.reasoningTokens)),
-				pc.yellow(formatNumber(totalsForDisplay.cacheReadTokens)),
-				pc.yellow(formatNumber(totalsForDisplay.totalTokens)),
-				pc.yellow(formatCurrency(totalsForDisplay.costUSD)),
+				pc.yellow(formatNumber(totalsSplit.inputTokens)),
+				pc.yellow(formatNumber(totalsSplit.outputTokens)),
+				pc.yellow(formatNumber(totalsSplit.reasoningTokens)),
+				pc.yellow(formatNumber(totalsSplit.cacheReadTokens)),
+				pc.yellow(formatNumber(totals.totalTokens)),
+				pc.yellow(formatCurrency(totals.costUSD)),
 				'',
 			]);
+			if (modelBreakdownVisibility.showTotalBreakdown) {
+				pushCodexModelBreakdownRows(table, totals.models, MODEL_BREAKDOWN_COLUMNS);
+			}
 
 			log(table.toString());
 
@@ -263,6 +265,43 @@ export const sessionCommand = define({
 });
 
 if (import.meta.vitest != null) {
+	describe('getSessionModelBreakdownVisibility', () => {
+		it('shows per-session model breakdown by default without expanding totals', () => {
+			expect(getSessionModelBreakdownVisibility({ breakdown: false })).toEqual({
+				showRowBreakdown: true,
+				showTotalBreakdown: false,
+			});
+		});
+
+		it('also expands totals when explicitly requested', () => {
+			expect(getSessionModelBreakdownVisibility({ breakdown: true })).toEqual({
+				showRowBreakdown: true,
+				showTotalBreakdown: true,
+			});
+		});
+	});
+
+	describe('MODEL_BREAKDOWN_COLUMNS', () => {
+		it('places model breakdown labels under the Models column', () => {
+			const [row] = formatCodexModelBreakdownRows(
+				{
+					'gpt-5': {
+						inputTokens: 100,
+						cachedInputTokens: 20,
+						outputTokens: 40,
+						reasoningOutputTokens: 10,
+						totalTokens: 140,
+						costUSD: 0.001,
+					},
+				},
+				MODEL_BREAKDOWN_COLUMNS,
+			);
+
+			expect(row?.[3]).toBe('');
+			expect(row?.[4]).toBe('  - gpt-5');
+		});
+	});
+
 	describe('formatSessionDateRange', () => {
 		it('returns a single date when the session stays on one local day', () => {
 			expect(
