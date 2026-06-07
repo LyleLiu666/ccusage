@@ -25,4 +25,6 @@ npx @ccusage/codex@latest daily
 
 The output uses the same responsive table component as ccusage, including compact mode support and per-model token summaries. Add `--breakdown` when you need to see how much each model contributed on a specific day.
 
+The `-w` / `--week` shortcut shows the last 7 calendar days and expands both the daily rows and weekly total by model, so you can compare weekly GPT 5.4 vs GPT 5.5 spend without adding extra flags.
+
 Need higher-level trends? Switch to the [monthly report](./monthly.md) for month-by-month rollups. Need chart-friendly recent buckets? Use `recent --hours 24 --interval 60 --json`.

@@ -43,7 +43,7 @@ function getDailyModelBreakdownVisibility(values: { breakdown?: boolean; week?: 
 	const showRowBreakdown = values.breakdown === true || values.week === true;
 	return {
 		showRowBreakdown,
-		showTotalBreakdown: values.breakdown === true,
+		showTotalBreakdown: values.breakdown === true || values.week === true,
 	};
 }
 
@@ -251,10 +251,10 @@ if (import.meta.vitest != null) {
 	});
 
 	describe('getDailyModelBreakdownVisibility', () => {
-		it('shows per-day model breakdown for weekly reports without expanding totals by default', () => {
+		it('shows per-day and total model breakdown for weekly reports', () => {
 			expect(getDailyModelBreakdownVisibility({ week: true, breakdown: false })).toEqual({
 				showRowBreakdown: true,
-				showTotalBreakdown: false,
+				showTotalBreakdown: true,
 			});
 		});
 
