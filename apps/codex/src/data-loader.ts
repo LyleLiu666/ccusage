@@ -319,6 +319,36 @@ function isMissingDirectoryError(error: unknown): boolean {
 	return (error as { code?: string }).code === 'ENOENT';
 }
 
+function tokenUsageEventKey(event: TokenUsageEvent): string {
+	return [
+		event.timestamp,
+		event.model ?? '',
+		event.inputTokens,
+		event.cachedInputTokens,
+		event.outputTokens,
+		event.reasoningOutputTokens,
+		event.totalTokens,
+	].join('\0');
+}
+
+function dedupeCopiedTokenEvents(events: TokenUsageEvent[]): void {
+	const seen = new Set<string>();
+	let writeIndex = 0;
+
+	for (const event of events) {
+		const key = tokenUsageEventKey(event);
+		if (seen.has(key)) {
+			continue;
+		}
+
+		seen.add(key);
+		events[writeIndex] = event;
+		writeIndex += 1;
+	}
+
+	events.length = writeIndex;
+}
+
 export async function loadTokenUsageEvents(options: LoadOptions = {}): Promise<LoadResult> {
 	const providedDirs =
 		options.sessionDirs != null && options.sessionDirs.length > 0
@@ -371,6 +401,7 @@ export async function loadTokenUsageEvents(options: LoadOptions = {}): Promise<L
 			cwd: directoryPath,
 			absolute: true,
 		});
+		files.sort((a, b) => a.localeCompare(b));
 
 		for (const file of files) {
 			// Skip files older than sinceTimestamp based on file modification time
@@ -542,6 +573,7 @@ export async function loadTokenUsageEvents(options: LoadOptions = {}): Promise<L
 		}
 	}
 
+	dedupeCopiedTokenEvents(events);
 	events.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
 	return { events, missingDirectories };
@@ -881,6 +913,82 @@ if (import.meta.vitest != null) {
 			});
 
 			expect(events).toEqual([]);
+		});
+
+		it('dedupes copied branch history across session files', async () => {
+			const parentHistory = [
+				JSON.stringify({
+					timestamp: '2026-05-12T08:00:00.000Z',
+					type: 'turn_context',
+					payload: {
+						model: 'gpt-5.2',
+					},
+				}),
+				JSON.stringify({
+					timestamp: '2026-05-12T08:01:00.000Z',
+					type: 'event_msg',
+					payload: {
+						type: 'token_count',
+						info: {
+							total_token_usage: {
+								input_tokens: 1_000,
+								cached_input_tokens: 100,
+								output_tokens: 200,
+								reasoning_output_tokens: 20,
+								total_tokens: 1_200,
+							},
+						},
+					},
+				}),
+			].join('\n');
+			const branchHistory = [
+				parentHistory,
+				JSON.stringify({
+					timestamp: '2026-05-12T08:02:00.000Z',
+					type: 'event_msg',
+					payload: {
+						type: 'token_count',
+						info: {
+							total_token_usage: {
+								input_tokens: 1_600,
+								cached_input_tokens: 300,
+								output_tokens: 450,
+								reasoning_output_tokens: 40,
+								total_tokens: 2_050,
+							},
+						},
+					},
+				}),
+			].join('\n');
+
+			await using fixture = await createFixture({
+				sessions: {
+					'2026-05-12T08-00-00-parent.jsonl': parentHistory,
+					'2026-05-12T08-02-00-branch.jsonl': branchHistory,
+				},
+			});
+
+			const { events } = await loadTokenUsageEvents({
+				sessionDirs: [fixture.getPath('sessions')],
+			});
+
+			expect(events).toHaveLength(2);
+			expect(events[0]).toMatchObject({
+				sessionId: '2026-05-12T08-00-00-parent',
+				inputTokens: 1_000,
+				cachedInputTokens: 100,
+				outputTokens: 200,
+				reasoningOutputTokens: 20,
+				totalTokens: 1_200,
+			});
+			expect(events[1]).toMatchObject({
+				sessionId: '2026-05-12T08-02-00-branch',
+				inputTokens: 600,
+				cachedInputTokens: 200,
+				outputTokens: 250,
+				reasoningOutputTokens: 20,
+				totalTokens: 850,
+			});
 		});
 
 		it('keeps normal forked sessions when the startup activity does not look like replay', async () => {

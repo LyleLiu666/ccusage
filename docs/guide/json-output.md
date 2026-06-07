@@ -205,6 +205,73 @@ ccusage daily --project my-frontend-app --json
 }
 ```
 
+### Codex Recent Reports
+
+The `@ccusage/codex` companion CLI has its own JSON shapes because Codex logs expose OpenAI model names, cached input tokens, reasoning output tokens, and per-time-bucket calls. Use `recent` when feeding a dashboard or chart:
+
+```bash
+ccusage-codex recent --hours 24 --interval 60 --json
+```
+
+<!-- eslint-skip -->
+
+```json
+{
+	"recent": [
+		{
+			"startTime": "2026-06-06T09:00:00.000Z",
+			"endTime": "2026-06-06T10:00:00.000Z",
+			"calls": 42,
+			"inputTokens": 120000,
+			"cachedInputTokens": 90000,
+			"outputTokens": 8000,
+			"reasoningOutputTokens": 1200,
+			"totalTokens": 128000,
+			"costUSD": 1.23,
+			"models": {
+				"gpt-5.4": {
+					"calls": 18,
+					"totalTokens": 53000,
+					"costUSD": 0.46,
+					"isFallback": false
+				},
+				"gpt-5.5": {
+					"calls": 24,
+					"totalTokens": 75000,
+					"costUSD": 0.77,
+					"isFallback": false
+				}
+			}
+		}
+	],
+	"totals": {
+		"calls": 42,
+		"totalTokens": 128000,
+		"costUSD": 1.23,
+		"models": {
+			"gpt-5.4": {
+				"calls": 18,
+				"totalTokens": 53000,
+				"costUSD": 0.46,
+				"isFallback": false
+			},
+			"gpt-5.5": {
+				"calls": 24,
+				"totalTokens": 75000,
+				"costUSD": 0.77,
+				"isFallback": false
+			}
+		}
+	},
+	"window": {
+		"hours": 24,
+		"intervalMinutes": 60,
+		"startTime": "2026-06-06T09:00:00.000Z",
+		"endTime": "2026-06-07T09:00:00.000Z"
+	}
+}
+```
+
 ## Field Descriptions
 
 ### Common Fields

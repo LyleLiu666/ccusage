@@ -4,12 +4,14 @@ import { cli, parseArgs } from 'gunshi';
 import { description, name, version } from '../package.json';
 import { dailyCommand } from './commands/daily.ts';
 import { monthlyCommand } from './commands/monthly.ts';
+import { recentCommand } from './commands/recent.ts';
 import { sessionCommand } from './commands/session.ts';
 import { logger } from './logger.ts';
 
-const subCommands = new Map([
+const subCommands = new Map<string, Command>([
 	['daily', dailyCommand],
 	['monthly', monthlyCommand],
+	['recent', recentCommand],
 	['session', sessionCommand],
 ]);
 
@@ -259,6 +261,12 @@ if (import.meta.vitest != null) {
 				message: 'Unknown option: -w',
 				helpArgs: ['monthly', '--help'],
 			});
+		});
+
+		it('allows recent command options', () => {
+			expect(
+				findUnsupportedCliArgument(['recent', '--hours', '12', '--interval', '60', '--all']),
+			).toBeUndefined();
 		});
 	});
 }

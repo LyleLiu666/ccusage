@@ -46,6 +46,7 @@ Since `npx @ccusage/codex@latest` is quite long to type repeatedly, we strongly 
 
 # Then simply run:
 ccusage-codex daily
+ccusage-codex recent --hours 24 --interval 60
 ccusage-codex monthly --json
 ```
 
@@ -63,6 +64,12 @@ npx @ccusage/codex@latest daily --since 20250911 --until 20250917
 # JSON output for scripting
 npx @ccusage/codex@latest daily --json
 
+# Recent activity in dashboard-friendly time buckets
+npx @ccusage/codex@latest recent --hours 24 --interval 60
+
+# Recent JSON report for charts and dashboards
+npx @ccusage/codex@latest recent --hours 24 --interval 60 --json
+
 # Monthly usage grouped by month
 npx @ccusage/codex@latest monthly
 
@@ -70,13 +77,13 @@ npx @ccusage/codex@latest monthly
 npx @ccusage/codex@latest monthly --json
 
 # Session-level detailed report
-npx @ccusage/codex@latest sessions
+npx @ccusage/codex@latest session
 ```
 
 Useful environment variables:
 
 - `CODEX_HOME` – override the root directory that contains Codex session folders
-- `LOG_LEVEL` – controla consola log verbosity (0 silent … 5 trace)
+- `LOG_LEVEL` – control logging verbosity (0 silent … 5 trace)
 
 ℹ️ The CLI now relies on the model metadata recorded in each `turn_context`. Sessions emitted during early September 2025 that lack this metadata are skipped to avoid mispricing. Newer builds of the Codex CLI restore the model field, and aliases such as `gpt-5-codex` automatically resolve to the correct LiteLLM pricing entry.
 📦 For legacy JSONL files that never emitted `turn_context` metadata, the CLI falls back to treating the tokens as `gpt-5` so that usage still appears in reports (pricing is therefore approximate for those sessions). In JSON output you will also see `"isFallback": true` on those model entries.
@@ -86,7 +93,8 @@ Useful environment variables:
 - 📊 Responsive terminal tables shared with the `ccusage` CLI
 - 💵 Offline-first pricing cache with automatic LiteLLM refresh when needed
 - 🤖 Per-model token and cost aggregation, including cached token accounting
-- 📅 Daily and monthly rollups with identical CLI options
+- ⏱️ Recent time-bucket reports for dashboards and quick model spend checks
+- 📅 Daily, monthly, and session rollups with identical CLI options
 - 📄 JSON output for further processing or scripting
 
 ## Documentation

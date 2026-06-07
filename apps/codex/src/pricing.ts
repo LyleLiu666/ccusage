@@ -1,5 +1,6 @@
 import type { LiteLLMModelPricing } from '@ccusage/internal/pricing';
 import type { ModelPricing, PricingSource } from './_types.ts';
+import type { CodexSpeed } from './codex-config.ts';
 import fs from 'node:fs/promises';
 
 import { homedir } from 'node:os';
@@ -15,6 +16,7 @@ import { logger } from './logger.ts';
 
 const CODEX_PROVIDER_PREFIXES = ['openai/', 'azure/', 'openrouter/openai/'];
 const CODEX_MODEL_ALIASES_MAP = new Map<string, string>([['gpt-5-codex', 'gpt-5']]);
+const CODEX_FAST_FALLBACK_MULTIPLIER = 2;
 
 function toPerMillion(value: number | undefined, fallback?: number): number {
 	const perToken = value ?? fallback ?? 0;
@@ -25,6 +27,7 @@ export type CodexPricingSourceOptions = {
 	offline?: boolean;
 	offlineLoader?: () => Promise<Record<string, LiteLLMModelPricing>>;
 	cacheFile?: string;
+	speed?: CodexSpeed;
 };
 
 const PREFETCHED_CODEX_PRICING = prefetchCodexPricing();
@@ -100,6 +103,7 @@ export class CodexPricingSource implements PricingSource, Disposable {
 	private readonly cacheFile: string;
 	private readonly offline: boolean;
 	private readonly offlineLoader?: () => Promise<Record<string, LiteLLMModelPricing>>;
+	private readonly speed: CodexSpeed;
 	private fetcher: LiteLLMPricingFetcher | null = null;
 	private fetcherPromise: Promise<LiteLLMPricingFetcher> | null = null;
 	private fetcherCacheStrategy: 'offline-only' | 'valid-cache-first' | 'network-first' | null =
@@ -109,6 +113,7 @@ export class CodexPricingSource implements PricingSource, Disposable {
 		this.cacheFile = options.cacheFile ?? CACHE_FILE;
 		this.offline = options.offline ?? false;
 		this.offlineLoader = options.offlineLoader;
+		this.speed = options.speed ?? 'standard';
 	}
 
 	[Symbol.dispose](): void {
@@ -263,13 +268,17 @@ export class CodexPricingSource implements PricingSource, Disposable {
 			throw new Error(`Pricing not found for model ${model}`);
 		}
 
+		const speedMultiplier =
+			this.speed === 'fast'
+				? (pricing.provider_specific_entry?.fast ?? CODEX_FAST_FALLBACK_MULTIPLIER)
+				: 1;
+
 		return {
-			inputCostPerMToken: toPerMillion(pricing.input_cost_per_token),
-			cachedInputCostPerMToken: toPerMillion(
-				pricing.cache_read_input_token_cost,
-				pricing.input_cost_per_token,
-			),
-			outputCostPerMToken: toPerMillion(pricing.output_cost_per_token),
+			inputCostPerMToken: toPerMillion(pricing.input_cost_per_token) * speedMultiplier,
+			cachedInputCostPerMToken:
+				toPerMillion(pricing.cache_read_input_token_cost, pricing.input_cost_per_token) *
+				speedMultiplier,
+			outputCostPerMToken: toPerMillion(pricing.output_cost_per_token) * speedMultiplier,
 		};
 	}
 }
@@ -429,6 +438,45 @@ if (import.meta.vitest != null) {
 			} finally {
 				vi.stubGlobal('fetch', originalFetch);
 			}
+		});
+
+		it('applies fast speed multiplier when configured', async () => {
+			using source = new CodexPricingSource({
+				offline: true,
+				speed: 'fast',
+				offlineLoader: async () => ({
+					'gpt-5.3-codex': {
+						input_cost_per_token: 1.75e-6,
+						output_cost_per_token: 1.4e-5,
+						cache_read_input_token_cost: 1.75e-7,
+						provider_specific_entry: { fast: 3 },
+					},
+				}),
+			});
+
+			const pricing = await source.getPricing('gpt-5.3-codex');
+			expect(pricing.inputCostPerMToken).toBeCloseTo(5.25);
+			expect(pricing.outputCostPerMToken).toBeCloseTo(42);
+			expect(pricing.cachedInputCostPerMToken).toBeCloseTo(0.525);
+		});
+
+		it('uses the Codex fast fallback multiplier when pricing has no provider-specific value', async () => {
+			using source = new CodexPricingSource({
+				offline: true,
+				speed: 'fast',
+				offlineLoader: async () => ({
+					'gpt-5.3-codex': {
+						input_cost_per_token: 1.75e-6,
+						output_cost_per_token: 1.4e-5,
+						cache_read_input_token_cost: 1.75e-7,
+					},
+				}),
+			});
+
+			const pricing = await source.getPricing('gpt-5.3-codex');
+			expect(pricing.inputCostPerMToken).toBeCloseTo(3.5);
+			expect(pricing.outputCostPerMToken).toBeCloseTo(28);
+			expect(pricing.cachedInputCostPerMToken).toBeCloseTo(0.35);
 		});
 	});
 }

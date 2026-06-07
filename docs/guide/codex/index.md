@@ -35,6 +35,7 @@ Since `npx @ccusage/codex@latest` is quite long to type repeatedly, we strongly 
 
 # Then simply run:
 ccusage-codex daily
+ccusage-codex recent --hours 24 --interval 60
 ccusage-codex monthly --json
 ```
 
@@ -44,7 +45,7 @@ After adding the alias to your shell config file (`.bashrc`, `.zshrc`, or `confi
 
 ## Data Source
 
-The CLI reads Codex session JSONL files located under `CODEX_HOME` (defaults to `~/.codex`). Each file represents a single Codex CLI session and contains running token totals that the tool converts into per-day or per-month deltas.
+The CLI reads Codex session JSONL files located under `CODEX_HOME` (defaults to `~/.codex`). Each file represents a single Codex CLI session and contains running token totals that the tool converts into per-turn deltas for daily, monthly, recent, and session reports.
 
 ## What Gets Calculated
 
@@ -53,20 +54,109 @@ The CLI reads Codex session JSONL files located under `CODEX_HOME` (defaults to 
 - **Pricing** – Rates come from LiteLLM's pricing dataset via the shared `LiteLLMPricingFetcher`. Aliases such as `gpt-5-codex` map to canonical entries (`gpt-5`) so cost calculations remain accurate.
 - **Legacy fallback** – Early September 2025 logs that never recorded `turn_context` metadata are still included; the CLI assumes `gpt-5` for pricing so you can review the tokens even though the model tag is missing (the JSON output also marks these rows with `"isFallback": true`).
 - **Cost formula** – Non-cached input uses the standard input price; cached input uses the cache-read price (falling back to the input price when missing); and output tokens are billed at the output price. All prices are per million tokens. Reasoning tokens may be shown for reference, but they are part of the output charge and are not billed separately.
-- **Totals and reports** – Daily, monthly, and session commands display per-model breakdowns, overall totals, and optional JSON for automation.
+- **Totals and reports** – Daily, monthly, recent, and session commands display per-model breakdowns, overall totals, and optional JSON for automation.
+
+## Recent Usage and Dashboard Integration
+
+Use `recent` when you need to answer questions like "what did each model cost yesterday afternoon?" or when you want frontend charts with stable time buckets.
+
+```bash
+# 24 one-hour buckets, readable in narrow terminals
+ccusage-codex recent --hours 24 --interval 60 --compact
+
+# 48 half-hour buckets for a dashboard chart
+ccusage-codex recent --hours 24 --interval 30 --json
+
+# Include per-model rows in the terminal table
+ccusage-codex recent --hours 24 --interval 60 --breakdown
+```
+
+JSON output is shaped for charting. Each row has `startTime`, `endTime`, aggregate token and cost fields, `calls`, and a `models` object keyed by model name. The `totals.models` object keeps the same per-model token, cost, and call fields, so a frontend does not need to recompute model totals before rendering a legend, summary strip, or stacked chart.
+
+<!-- eslint-skip -->
+
+```json
+{
+	"recent": [
+		{
+			"startTime": "2026-06-06T09:00:00.000Z",
+			"endTime": "2026-06-06T10:00:00.000Z",
+			"calls": 42,
+			"inputTokens": 120000,
+			"cachedInputTokens": 90000,
+			"outputTokens": 8000,
+			"reasoningOutputTokens": 1200,
+			"totalTokens": 128000,
+			"costUSD": 1.23,
+			"models": {
+				"gpt-5.4": {
+					"calls": 18,
+					"inputTokens": 50000,
+					"cachedInputTokens": 35000,
+					"outputTokens": 3000,
+					"reasoningOutputTokens": 500,
+					"totalTokens": 53000,
+					"costUSD": 0.46,
+					"isFallback": false
+				},
+				"gpt-5.5": {
+					"calls": 24,
+					"inputTokens": 70000,
+					"cachedInputTokens": 55000,
+					"outputTokens": 5000,
+					"reasoningOutputTokens": 700,
+					"totalTokens": 75000,
+					"costUSD": 0.77,
+					"isFallback": false
+				}
+			}
+		}
+	],
+	"totals": {
+		"calls": 42,
+		"inputTokens": 120000,
+		"cachedInputTokens": 90000,
+		"outputTokens": 8000,
+		"reasoningOutputTokens": 1200,
+		"totalTokens": 128000,
+		"costUSD": 1.23,
+		"models": {
+			"gpt-5.4": {
+				"calls": 18,
+				"totalTokens": 53000,
+				"costUSD": 0.46,
+				"isFallback": false
+			},
+			"gpt-5.5": {
+				"calls": 24,
+				"totalTokens": 75000,
+				"costUSD": 0.77,
+				"isFallback": false
+			}
+		}
+	},
+	"window": {
+		"hours": 24,
+		"intervalMinutes": 60,
+		"startTime": "2026-06-06T09:00:00.000Z",
+		"endTime": "2026-06-07T09:00:00.000Z"
+	}
+}
+```
 
 ## Environment Variables
 
 | Variable     | Description                                                  |
 | ------------ | ------------------------------------------------------------ |
 | `CODEX_HOME` | Override the root directory containing Codex session folders |
-| `LOG_LEVEL`  | Adjust consola verbosity (0 silent … 5 trace)                |
+| `LOG_LEVEL`  | Adjust logging verbosity (0 silent … 5 trace)                |
 
 When Codex emits a model alias (for example `gpt-5-codex`), the CLI automatically resolves it to the canonical LiteLLM pricing entry. No manual override is needed.
 
 ## Next Steps
 
 - [Daily report command](./daily.md)
+- Recent report command: `ccusage-codex recent --hours 24 --interval 60`
 - [Monthly report command](./monthly.md)
 - [Session report command](./session.md)
 - Additional reports will mirror the ccusage CLI as the Codex tooling stabilizes.

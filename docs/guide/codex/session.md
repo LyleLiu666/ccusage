@@ -21,8 +21,10 @@ npx @ccusage/codex@latest session
 | `--locale`                   | Adjust locale for table and timestamp formatting                         |
 | `--json`                     | Emit structured JSON (`{ sessions: [], totals: {} }`) instead of a table |
 | `--offline` / `--no-offline` | Force cached LiteLLM pricing or enable live fetching                     |
+| `--speed`                    | Choose `auto`, `standard`, or `fast` Codex pricing                       |
 | `--compact`                  | Force compact table layout (same columns as a narrow terminal)           |
+| `--breakdown`                | Also expand the totals row into per-model token and cost rows            |
 
 JSON output includes a `sessions` array with per-model breakdowns, cached token counts, `lastActivity`, and `isFallback` flags for any events that required the legacy `gpt-5` pricing fallback.
 
-Need time-based rollups instead? Check out the [daily](./daily.md) and [monthly](./monthly.md) reports for broader aggregates that reuse the same data source.
+Need time-based rollups instead? Check out the [daily](./daily.md) and [monthly](./monthly.md) reports for broader aggregates, or use `recent --hours 24 --interval 60 --json` for dashboard time buckets.

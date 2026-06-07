@@ -11,6 +11,7 @@ import { define } from 'gunshi';
 import pc from 'picocolors';
 import { DEFAULT_TIMEZONE } from '../_consts.ts';
 import { sharedArgs } from '../_shared-args.ts';
+import { normalizeSpeedOption, resolveCodexSpeed } from '../codex-config.ts';
 import {
 	calculateCodexReportTotals,
 	formatModelsList,
@@ -70,6 +71,14 @@ export const monthlyCommand = define({
 			process.exit(1);
 		}
 
+		let speed;
+		try {
+			speed = await resolveCodexSpeed(normalizeSpeedOption(ctx.values.speed));
+		} catch (error) {
+			logger.error(String(error));
+			process.exit(1);
+		}
+
 		const { events, missingDirectories } = await loadTokenUsageEvents({ sinceTimestamp });
 
 		for (const missing of missingDirectories) {
@@ -85,6 +94,7 @@ export const monthlyCommand = define({
 
 		const pricingSource = new CodexPricingSource({
 			offline: ctx.values.offline,
+			speed,
 		});
 		try {
 			const rows = await buildMonthlyReport(events, {
