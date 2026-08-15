@@ -11,6 +11,7 @@ const CODEX_MODEL_PREFIXES = [
 	'openai/gpt-5',
 	'azure/gpt-5',
 	'openrouter/openai/gpt-5',
+	'chatgpt/gpt-5',
 ];
 
 function isCodexModel(modelName: string, _pricing: LiteLLMModelPricing): boolean {

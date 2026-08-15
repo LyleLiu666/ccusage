@@ -8,6 +8,34 @@ export type TokenUsageDelta = {
 
 export type SessionStorageSource = 'active' | 'archived' | 'custom';
 
+export type CodexNonTokenUsageEventType =
+	| 'ambient_suggestion'
+	| 'collab_agent_spawn_begin'
+	| 'collab_agent_spawn_end'
+	| 'image_generation_call'
+	| 'model/rerouted'
+	| 'model_rerouted'
+	| 'spawn_agent'
+	| 'thread/compacted'
+	| 'thread/name/updated'
+	| 'thread/settings/updated'
+	| 'thread_compacted'
+	| 'thread_name_updated'
+	| 'thread_settings_applied'
+	| 'thread_settings_updated'
+	| 'wait_agent'
+	| 'thread_title_updated'
+	| 'thread_goal_updated'
+	| 'conversation_summary';
+
+export type CodexUsageCoverageAudit = {
+	tokenCountEvents: number;
+	fallbackModelTokenEvents: number;
+	replayDroppedTokenEvents: number;
+	nonTokenUsageEvents: Partial<Record<CodexNonTokenUsageEventType, number>>;
+	nonTokenUsageModels: Partial<Record<CodexNonTokenUsageEventType, Record<string, number>>>;
+};
+
 export type TokenUsageEvent = TokenUsageDelta & {
 	timestamp: string;
 	sessionId: string;
@@ -47,6 +75,7 @@ export type SessionUsageSummary = {
 
 export type ModelPricing = {
 	inputCostPerMToken: number;
+	cacheWriteInputCostPerMToken?: number;
 	cachedInputCostPerMToken: number;
 	outputCostPerMToken: number;
 };

@@ -33,7 +33,9 @@ function nonCachedInputTokens(usage: TokenUsageDelta): number {
  * @returns Cost in USD
  *
  * @remarks
- * - Cached input tokens receive a 50% discount from OpenAI
+ * - Non-cached input is treated as cache creation when the pricing source exposes
+ * a separate cache-write rate. Codex token_count logs do not expose a finer split.
+ * - Cached input tokens use the model's cache-read rate.
  * @see {@link https://platform.openai.com/docs/guides/prompt-caching}
  *
  * - Reasoning tokens are already included in output_tokens, so they are not added separately
@@ -45,7 +47,8 @@ export function calculateCostUSD(usage: TokenUsageDelta, pricing: ModelPricing):
 		usage.cachedInputTokens > usage.inputTokens ? usage.inputTokens : usage.cachedInputTokens;
 	const outputTokens = usage.outputTokens;
 
-	const inputCost = (nonCachedInput / MILLION) * pricing.inputCostPerMToken;
+	const cacheWriteRate = pricing.cacheWriteInputCostPerMToken ?? pricing.inputCostPerMToken;
+	const inputCost = (nonCachedInput / MILLION) * cacheWriteRate;
 	const cachedCost = (cachedInput / MILLION) * pricing.cachedInputCostPerMToken;
 	const outputCost = (outputTokens / MILLION) * pricing.outputCostPerMToken;
 
@@ -53,3 +56,46 @@ export function calculateCostUSD(usage: TokenUsageDelta, pricing: ModelPricing):
 }
 
 export { formatCurrency, formatTokens };
+
+if (import.meta.vitest != null) {
+	describe('calculateCostUSD', () => {
+		it('charges non-cached GPT-5.6 input at the cache-write rate', () => {
+			const cost = calculateCostUSD(
+				{
+					inputTokens: 1_000_000,
+					cachedInputTokens: 600_000,
+					outputTokens: 100_000,
+					reasoningOutputTokens: 20_000,
+					totalTokens: 1_100_000,
+				},
+				{
+					inputCostPerMToken: 5,
+					cacheWriteInputCostPerMToken: 6.25,
+					cachedInputCostPerMToken: 0.5,
+					outputCostPerMToken: 30,
+				},
+			);
+
+			expect(cost).toBeCloseTo(5.8);
+		});
+
+		it('uses the ordinary input rate when cache-write pricing is unavailable', () => {
+			const cost = calculateCostUSD(
+				{
+					inputTokens: 1_000_000,
+					cachedInputTokens: 0,
+					outputTokens: 0,
+					reasoningOutputTokens: 0,
+					totalTokens: 1_000_000,
+				},
+				{
+					inputCostPerMToken: 5,
+					cachedInputCostPerMToken: 0.5,
+					outputCostPerMToken: 30,
+				},
+			);
+
+			expect(cost).toBeCloseTo(5);
+		});
+	});
+}

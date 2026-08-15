@@ -256,6 +256,10 @@ if (import.meta.vitest != null) {
 			expect(findUnsupportedCliArgument(['-wb'])).toBeUndefined();
 		});
 
+		it('allows kebab-case no-color option from the help text', () => {
+			expect(findUnsupportedCliArgument(['-w', '--no-color'])).toBeUndefined();
+		});
+
 		it('rejects short options that are not valid for the selected command', () => {
 			expect(findUnsupportedCliArgument(['monthly', '-w'])).toEqual({
 				message: 'Unknown option: -w',

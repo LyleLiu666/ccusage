@@ -1,3 +1,4 @@
+import type { CodexNonTokenUsageEventType, CodexUsageCoverageAudit } from '../_types.ts';
 import process from 'node:process';
 import {
 	addEmptySeparatorRow,
@@ -35,6 +36,51 @@ const MODEL_BREAKDOWN_COLUMNS = {
 	totalTokensColumn: 6,
 	costColumn: 7,
 };
+
+// Lifecycle and state events do not represent missing token usage. Only surface
+// operations whose cost cannot be reconstructed from `token_count` events.
+const SEPARATELY_ACCOUNTED_EVENT_TYPES = new Set<CodexNonTokenUsageEventType>([
+	'image_generation_call',
+]);
+
+function formatCoverageWarning(coverage: CodexUsageCoverageAudit): string | undefined {
+	const separatelyAccountedEvents = Object.entries(coverage.nonTokenUsageEvents)
+		.filter(
+			([type, count]) =>
+				SEPARATELY_ACCOUNTED_EVENT_TYPES.has(type as CodexNonTokenUsageEventType) &&
+				count != null &&
+				count > 0,
+		)
+		.map(([type, count]) => {
+			const models =
+				coverage.nonTokenUsageModels[type as keyof typeof coverage.nonTokenUsageModels];
+			const modelSummary =
+				models == null
+					? ''
+					: ` (${Object.entries(models)
+							.map(([model, modelCount]) => `${model} x${modelCount}`)
+							.join(', ')})`;
+			return `${type} x${count}${modelSummary}`;
+		})
+		.join(', ');
+
+	const messages: string[] = [];
+	if (separatelyAccountedEvents !== '') {
+		messages.push(`Codex events requiring separate accounting: ${separatelyAccountedEvents}`);
+	}
+	if (coverage.fallbackModelTokenEvents > 0) {
+		messages.push(
+			`${coverage.fallbackModelTokenEvents} token_count event(s) used fallback model pricing`,
+		);
+	}
+	if (coverage.replayDroppedTokenEvents > 0) {
+		messages.push(
+			`${coverage.replayDroppedTokenEvents} token_count event(s) from replayed fork history were skipped (already counted in their original sessions)`,
+		);
+	}
+
+	return messages.length === 0 ? undefined : `Coverage note: ${messages.join('; ')}.`;
+}
 
 function getDailyModelBreakdownVisibility(values: { breakdown?: boolean; week?: boolean }): {
 	showRowBreakdown: boolean;
@@ -111,14 +157,18 @@ export const dailyCommand = define({
 			process.exit(1);
 		}
 
-		const { events, missingDirectories } = await loadTokenUsageEvents({ sinceTimestamp });
+		const { events, missingDirectories, coverage } = await loadTokenUsageEvents({ sinceTimestamp });
 
 		for (const missing of missingDirectories) {
 			logger.warn(`Codex session directory not found: ${missing}`);
 		}
 
 		if (events.length === 0) {
-			log(jsonOutput ? JSON.stringify({ daily: [], totals: null }) : 'No Codex usage data found.');
+			log(
+				jsonOutput
+					? JSON.stringify({ daily: [], totals: null, coverage })
+					: 'No Codex usage data found.',
+			);
 			return;
 		}
 
@@ -138,7 +188,7 @@ export const dailyCommand = define({
 			if (rows.length === 0) {
 				log(
 					jsonOutput
-						? JSON.stringify({ daily: [], totals: null })
+						? JSON.stringify({ daily: [], totals: null, coverage })
 						: 'No Codex usage data found for provided filters.',
 				);
 				return;
@@ -152,6 +202,7 @@ export const dailyCommand = define({
 						{
 							daily: rows,
 							totals,
+							coverage,
 						},
 						null,
 						2,
@@ -222,6 +273,11 @@ export const dailyCommand = define({
 
 			log(table.toString());
 
+			const coverageWarning = formatCoverageWarning(coverage);
+			if (coverageWarning != null) {
+				logger.warn(coverageWarning);
+			}
+
 			if (table.isCompactMode()) {
 				logger.info('\nRunning in Compact Mode');
 				logger.info('Expand terminal width to see cache metrics and total tokens');
@@ -270,6 +326,64 @@ if (import.meta.vitest != null) {
 				showRowBreakdown: false,
 				showTotalBreakdown: false,
 			});
+		});
+	});
+
+	describe('formatCoverageWarning', () => {
+		it('summarizes separately accounted usage events and fallback model events', () => {
+			expect(
+				formatCoverageWarning({
+					tokenCountEvents: 2,
+					fallbackModelTokenEvents: 1,
+					replayDroppedTokenEvents: 0,
+					nonTokenUsageEvents: {
+						image_generation_call: 1,
+						spawn_agent: 2,
+					},
+					nonTokenUsageModels: {
+						spawn_agent: {
+							'gpt-5.1-codex-mini': 2,
+						},
+					},
+				}),
+			).toBe(
+				'Coverage note: Codex events requiring separate accounting: image_generation_call x1; 1 token_count event(s) used fallback model pricing.',
+			);
+		});
+
+		it('does not warn for routine Codex metadata and background activity', () => {
+			expect(
+				formatCoverageWarning({
+					tokenCountEvents: 220,
+					fallbackModelTokenEvents: 0,
+					replayDroppedTokenEvents: 0,
+					nonTokenUsageEvents: {
+						ambient_suggestion: 4,
+						thread_goal_updated: 23,
+						thread_settings_applied: 220,
+					},
+					nonTokenUsageModels: {
+						thread_settings_applied: {
+							'gpt-5.5': 2,
+							'gpt-5.6-luna': 3,
+							'gpt-5.6-sol': 214,
+							'gpt-5.6-terra': 1,
+						},
+					},
+				}),
+			).toBeUndefined();
+		});
+
+		it('omits the warning when coverage is complete', () => {
+			expect(
+				formatCoverageWarning({
+					tokenCountEvents: 1,
+					fallbackModelTokenEvents: 0,
+					replayDroppedTokenEvents: 0,
+					nonTokenUsageEvents: {},
+					nonTokenUsageModels: {},
+				}),
+			).toBeUndefined();
 		});
 	});
 }

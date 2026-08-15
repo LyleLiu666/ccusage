@@ -14,13 +14,32 @@ import { MILLION } from './_consts.ts';
 import { prefetchCodexPricing } from './_macro.ts' with { type: 'macro' };
 import { logger } from './logger.ts';
 
-const CODEX_PROVIDER_PREFIXES = ['openai/', 'azure/', 'openrouter/openai/'];
-const CODEX_MODEL_ALIASES_MAP = new Map<string, string>([['gpt-5-codex', 'gpt-5']]);
+const CODEX_PROVIDER_PREFIXES = ['openai/', 'azure/', 'openrouter/openai/', 'chatgpt/'];
+const CODEX_MODEL_ALIASES_MAP = new Map<string, string>([
+	['gpt-5-codex', 'gpt-5'],
+	['gpt-5.3-codex-spark', 'gpt-5.3-codex'],
+	['gpt-5.3-spark', 'gpt-5.3-codex-spark'],
+]);
 const CODEX_FAST_FALLBACK_MULTIPLIER = 2;
+const FREE_MODEL_PRICING = {
+	inputCostPerMToken: 0,
+	cacheWriteInputCostPerMToken: 0,
+	cachedInputCostPerMToken: 0,
+	outputCostPerMToken: 0,
+} as const satisfies ModelPricing;
 
 function toPerMillion(value: number | undefined, fallback?: number): number {
 	const perToken = value ?? fallback ?? 0;
 	return perToken * MILLION;
+}
+
+function hasBillableTokenPricing(pricing: LiteLLMModelPricing): boolean {
+	return (
+		typeof pricing.input_cost_per_token === 'number' &&
+		Number.isFinite(pricing.input_cost_per_token) &&
+		typeof pricing.output_cost_per_token === 'number' &&
+		Number.isFinite(pricing.output_cost_per_token)
+	);
 }
 
 export type CodexPricingSourceOptions = {
@@ -163,7 +182,7 @@ export class CodexPricingSource implements PricingSource, Disposable {
 		return Array.from(candidates);
 	}
 
-	private async hasExplicitPricingEntry(
+	private async hasBillableExplicitPricingEntry(
 		fetcher: LiteLLMPricingFetcher,
 		model: string,
 	): Promise<boolean> {
@@ -173,7 +192,8 @@ export class CodexPricingSource implements PricingSource, Disposable {
 		}
 
 		for (const candidate of this.createLookupCandidates(model)) {
-			if (pricingDataset.value.has(candidate)) {
+			const pricing = pricingDataset.value.get(candidate);
+			if (pricing != null && hasBillableTokenPricing(pricing)) {
 				return true;
 			}
 		}
@@ -185,24 +205,19 @@ export class CodexPricingSource implements PricingSource, Disposable {
 		fetcher: LiteLLMPricingFetcher,
 		model: string,
 	): Promise<LiteLLMModelPricing | null> {
-		const directLookup = await fetcher.getModelPricing(model);
-		if (Result.isFailure(directLookup)) {
-			throw directLookup.error;
+		const pricingDataset = await fetcher.fetchModelPricing();
+		if (Result.isFailure(pricingDataset)) {
+			throw pricingDataset.error;
 		}
 
-		let pricing = directLookup.value;
-		if (pricing == null) {
-			const alias = CODEX_MODEL_ALIASES_MAP.get(model);
-			if (alias != null) {
-				const aliasLookup = await fetcher.getModelPricing(alias);
-				if (Result.isFailure(aliasLookup)) {
-					throw aliasLookup.error;
-				}
-				pricing = aliasLookup.value;
+		for (const candidate of this.createLookupCandidates(model)) {
+			const pricing = pricingDataset.value.get(candidate);
+			if (pricing != null && hasBillableTokenPricing(pricing)) {
+				return pricing;
 			}
 		}
 
-		return pricing;
+		return null;
 	}
 
 	private async refreshFetcherFromNetwork(): Promise<LiteLLMPricingFetcher> {
@@ -258,14 +273,15 @@ export class CodexPricingSource implements PricingSource, Disposable {
 		if (
 			!this.offline &&
 			this.fetcherCacheStrategy === 'valid-cache-first' &&
-			!(await this.hasExplicitPricingEntry(fetcher, model))
+			!(await this.hasBillableExplicitPricingEntry(fetcher, model))
 		) {
 			fetcher = await this.refreshFetcherFromNetwork();
 			pricing = await this.lookupPricing(fetcher, model);
 		}
 
 		if (pricing == null) {
-			throw new Error(`Pricing not found for model ${model}`);
+			logger.warn(`Pricing not found for model ${model}; defaulting to zero-cost pricing.`);
+			return FREE_MODEL_PRICING;
 		}
 
 		const speedMultiplier =
@@ -275,6 +291,9 @@ export class CodexPricingSource implements PricingSource, Disposable {
 
 		return {
 			inputCostPerMToken: toPerMillion(pricing.input_cost_per_token) * speedMultiplier,
+			cacheWriteInputCostPerMToken:
+				toPerMillion(pricing.cache_creation_input_token_cost, pricing.input_cost_per_token) *
+				speedMultiplier,
 			cachedInputCostPerMToken:
 				toPerMillion(pricing.cache_read_input_token_cost, pricing.input_cost_per_token) *
 				speedMultiplier,
@@ -285,6 +304,27 @@ export class CodexPricingSource implements PricingSource, Disposable {
 
 if (import.meta.vitest != null) {
 	describe('CodexPricingSource', () => {
+		it('uses the explicit GPT-5.6 cache-write price', async () => {
+			using source = new CodexPricingSource({
+				offline: true,
+				offlineLoader: async () => ({
+					'gpt-5.6-sol': {
+						input_cost_per_token: 5e-6,
+						cache_creation_input_token_cost: 6.25e-6,
+						cache_read_input_token_cost: 0.5e-6,
+						output_cost_per_token: 30e-6,
+					},
+				}),
+			});
+
+			const pricing = await source.getPricing('gpt-5.6-sol');
+
+			expect(pricing.inputCostPerMToken).toBeCloseTo(5);
+			expect(pricing.cacheWriteInputCostPerMToken).toBeCloseTo(6.25);
+			expect(pricing.cachedInputCostPerMToken).toBeCloseTo(0.5);
+			expect(pricing.outputCostPerMToken).toBeCloseTo(30);
+		});
+
 		it('converts LiteLLM pricing to per-million costs', async () => {
 			using source = new CodexPricingSource({
 				offline: true,
@@ -477,6 +517,83 @@ if (import.meta.vitest != null) {
 			expect(pricing.inputCostPerMToken).toBeCloseTo(3.5);
 			expect(pricing.outputCostPerMToken).toBeCloseTo(28);
 			expect(pricing.cachedInputCostPerMToken).toBeCloseTo(0.35);
+		});
+
+		it('looks up Codex desktop models published under the chatgpt provider prefix', async () => {
+			using source = new CodexPricingSource({
+				offline: true,
+				offlineLoader: async () => ({
+					'chatgpt/gpt-5.3-codex-spark': {
+						input_cost_per_token: 3e-6,
+						output_cost_per_token: 2e-5,
+						cache_read_input_token_cost: 3e-7,
+					},
+				}),
+			});
+
+			const pricing = await source.getPricing('gpt-5.3-codex-spark');
+
+			expect(pricing.inputCostPerMToken).toBeCloseTo(3);
+			expect(pricing.outputCostPerMToken).toBeCloseTo(20);
+			expect(pricing.cachedInputCostPerMToken).toBeCloseTo(0.3);
+		});
+
+		it('falls back from unpriced ChatGPT Codex entries to billable base model pricing', async () => {
+			using source = new CodexPricingSource({
+				offline: true,
+				offlineLoader: async () => ({
+					'chatgpt/gpt-5.3-codex-spark': {
+						max_tokens: 128_000,
+						max_input_tokens: 128_000,
+						max_output_tokens: 128_000,
+					},
+					'gpt-5.3-codex': {
+						input_cost_per_token: 1.75e-6,
+						output_cost_per_token: 1.4e-5,
+						cache_read_input_token_cost: 1.75e-7,
+					},
+				}),
+			});
+
+			const pricing = await source.getPricing('gpt-5.3-codex-spark');
+
+			expect(pricing.inputCostPerMToken).toBeCloseTo(1.75);
+			expect(pricing.outputCostPerMToken).toBeCloseTo(14);
+			expect(pricing.cachedInputCostPerMToken).toBeCloseTo(0.175);
+		});
+
+		it('falls back to zero-cost pricing instead of throwing for unknown models', async () => {
+			using source = new CodexPricingSource({
+				offline: true,
+				offlineLoader: async () => ({
+					'chatgpt/gpt-5.3-codex-spark': {
+						max_tokens: 128_000,
+						max_input_tokens: 128_000,
+						max_output_tokens: 128_000,
+					},
+				}),
+			});
+
+			const pricing = await source.getPricing('gpt-5.3-codex-spark');
+			expect(pricing.inputCostPerMToken).toBe(0);
+			expect(pricing.cacheWriteInputCostPerMToken).toBe(0);
+			expect(pricing.cachedInputCostPerMToken).toBe(0);
+			expect(pricing.outputCostPerMToken).toBe(0);
+		});
+
+		it('returns zero pricing for models missing from the pricing dataset', async () => {
+			using source = new CodexPricingSource({
+				offline: true,
+				offlineLoader: async () => ({}),
+			});
+
+			const pricing = await source.getPricing('codex-auto-review');
+			expect(pricing).toEqual({
+				inputCostPerMToken: 0,
+				cacheWriteInputCostPerMToken: 0,
+				cachedInputCostPerMToken: 0,
+				outputCostPerMToken: 0,
+			});
 		});
 	});
 }

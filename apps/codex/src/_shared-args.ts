@@ -62,6 +62,7 @@ export const sharedArgs = {
 	noColor: {
 		// --no-color and NO_COLOR=1 is handled by picocolors
 		type: 'boolean',
+		toKebab: true,
 		description: 'Disable colored output (default: auto). NO_COLOR=1 has the same effect.',
 	},
 } as const satisfies Args;
